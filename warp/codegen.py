@@ -316,7 +316,7 @@ class StructInstance:
             # vector/matrix type, e.g. vec3
             if value is None:
                 setattr(self._ctype, name, var.type())
-            elif types_equal(type(value), var.type):
+            elif type(value) == var.type:
                 setattr(self._ctype, name, value)
             else:
                 # conversion from list/tuple, ndarray, etc.
@@ -413,11 +413,14 @@ class StructInstance:
 class Struct:
     hash: bytes
 
-    def __init__(self, cls: type, key: str, module: warp.context.Module):
+    def __init__(self, key: str, cls: type, module: warp.context.Module):
+        self.key = key
         self.cls = cls
         self.module = module
-        self.key = key
         self.vars: dict[str, Var] = {}
+
+        if isinstance(self.cls, Sequence):
+            raise RuntimeError("Warp structs must be defined as base classes")
 
         annotations = get_annotations(self.cls)
         for label, type in annotations.items():
@@ -489,7 +492,7 @@ class Struct:
 
         self.default_constructor.add_overload(self.value_constructor)
 
-        if module:
+        if isinstance(module, warp.context.Module):
             module.register_struct(self)
 
         # Define class for instances of this struct
@@ -618,7 +621,7 @@ def compute_type_str(base_name, template_params):
 
         return p.__name__
 
-    return f"{base_name}<{','.join(map(param2str, template_params))}>"
+    return f"{base_name}<{', '.join(map(param2str, template_params))}>"
 
 
 class Var:
@@ -660,36 +663,43 @@ class Var:
         return self.label
 
     @staticmethod
-    def type_to_ctype(t: type, value_type: builtins.bool = False) -> str:
-        if is_array(t):
-            if hasattr(t.dtype, "_wp_generic_type_str_"):
-                dtypestr = compute_type_str(f"wp::{t.dtype._wp_generic_type_str_}", t.dtype._wp_type_params_)
-            elif isinstance(t.dtype, Struct):
-                dtypestr = t.dtype.native_name
-            elif t.dtype.__name__ in ("bool", "int", "float"):
-                dtypestr = t.dtype.__name__
-            else:
-                dtypestr = f"wp::{t.dtype.__name__}"
-            classstr = f"wp::{type(t).__name__}"
-            return f"{classstr}_t<{dtypestr}>"
-        elif is_tile(t):
-            return t.ctype()
+    def dtype_to_ctype(t: type) -> str:
+        if hasattr(t, "_wp_generic_type_str_"):
+            return compute_type_str(f"wp::{t._wp_generic_type_str_}", t._wp_type_params_)
         elif isinstance(t, Struct):
             return t.native_name
+        elif hasattr(t, "_wp_native_name_"):
+            return f"wp::{t._wp_native_name_}"
+        elif t.__name__ in ("bool", "int", "float"):
+            return t.__name__
+
+        return f"wp::{t.__name__}"
+
+    @staticmethod
+    def type_to_ctype(t: type, value_type: builtins.bool = False) -> str:
+        if is_array(t):
+            dtypestr = Var.dtype_to_ctype(t.dtype)
+            classstr = f"wp::{type(t).__name__}"
+            return f"{classstr}_t<{dtypestr}>"
+        elif get_origin(t) is tuple:
+            dtypestr = ", ".join(Var.dtype_to_ctype(x) for x in get_args(t))
+            return f"wp::tuple_t<{dtypestr}>"
+        elif is_tuple(t):
+            dtypestr = ", ".join(Var.dtype_to_ctype(x) for x in t.types)
+            classstr = f"wp::{type(t).__name__}"
+            return f"{classstr}<{dtypestr}>"
+        elif is_tile(t):
+            return t.ctype()
         elif isinstance(t, type) and issubclass(t, StructInstance):
             # ensure the actual Struct name is used instead of "NewStructInstance"
             return t.native_name
         elif is_reference(t):
             if not value_type:
                 return Var.type_to_ctype(t.value_type) + "*"
-            else:
-                return Var.type_to_ctype(t.value_type)
-        elif hasattr(t, "_wp_generic_type_str_"):
-            return compute_type_str(f"wp::{t._wp_generic_type_str_}", t._wp_type_params_)
-        elif t.__name__ in ("bool", "int", "float"):
-            return t.__name__
-        else:
-            return f"wp::{t.__name__}"
+
+            return Var.type_to_ctype(t.value_type)
+
+        return Var.dtype_to_ctype(t)
 
     def ctype(self, value_type: builtins.bool = False) -> str:
         return Var.type_to_ctype(self.type, value_type)
@@ -813,17 +823,26 @@ def func_match_args(func, arg_types, kwarg_types):
     return True
 
 
-def get_arg_type(arg: Union[Var, Any]) -> type:
+def get_arg_type(arg: Var | Any) -> type:
     if isinstance(arg, str):
         return str
 
     if isinstance(arg, Sequence):
         return tuple(get_arg_type(x) for x in arg)
 
+    if get_origin(arg) is tuple:
+        return tuple(get_arg_type(x) for x in get_args(arg))
+
+    if is_tuple(arg):
+        return arg
+
     if isinstance(arg, (type, warp.context.Function)):
         return arg
 
     if isinstance(arg, Var):
+        if get_origin(arg.type) is tuple:
+            return get_args(arg.type)
+
         return arg.type
 
     return type(arg)
@@ -837,7 +856,11 @@ def get_arg_value(arg: Any) -> Any:
         return arg
 
     if isinstance(arg, Var):
-        return arg.constant
+        if is_tuple(arg.type):
+            return tuple(get_arg_value(x) for x in arg.type.values)
+
+        if arg.constant is not None:
+            return arg.constant
 
     return arg
 
@@ -856,6 +879,7 @@ class Adjoint:
         custom_reverse_mode=False,
         custom_reverse_num_input_args=-1,
         transformers: list[ast.NodeTransformer] | None = None,
+        source: str | None = None,
     ):
         adj.func = func
 
@@ -869,19 +893,17 @@ class Adjoint:
         # extract name of source file
         adj.filename = inspect.getsourcefile(func) or "unknown source file"
         # get source file line number where function starts
-        try:
-            _, adj.fun_lineno = inspect.getsourcelines(func)
-        except OSError as e:
-            raise RuntimeError(
-                "Directly evaluating Warp code defined as a string using `exec()` is not supported, "
-                "please save it on a file and use `importlib` if needed."
-            ) from e
+        adj.fun_lineno = 0
+        adj.source = source
+        if adj.source is None:
+            adj.source, adj.fun_lineno = adj.extract_function_source(func)
+
+        assert adj.source is not None, f"Failed to extract source code for function {func.__name__}"
 
         # Indicates where the function definition starts (excludes decorators)
         adj.fun_def_lineno = None
 
         # get function source code
-        adj.source = inspect.getsource(func)
         # ensures that indented class methods can be parsed as kernels
         adj.source = textwrap.dedent(adj.source)
 
@@ -972,6 +994,18 @@ class Adjoint:
                 total_shared += var.type.size_in_bytes()
 
         return total_shared + adj.max_required_extra_shared_memory
+
+    @staticmethod
+    def extract_function_source(func: Callable) -> tuple[str, int]:
+        try:
+            _, fun_lineno = inspect.getsourcelines(func)
+            source = inspect.getsource(func)
+        except OSError as e:
+            raise RuntimeError(
+                "Directly evaluating Warp code defined as a string using `exec()` is not supported, "
+                "please save it to a file and use `importlib` if needed."
+            ) from e
+        return source, fun_lineno
 
     # generate function ssa form and adjoint
     def build(adj, builder, default_builder_options=None):
@@ -1389,6 +1423,17 @@ class Adjoint:
             bound_arg_values,
         )
 
+        # Handle the special case where a Var instance is returned from the `value_func`
+        # callback, in which case we replace the call with a reference to that variable.
+        if isinstance(return_type, Var):
+            return adj.register_var(return_type)
+        elif isinstance(return_type, Sequence) and all(isinstance(x, Var) for x in return_type):
+            return tuple(adj.register_var(x) for x in return_type)
+
+        if get_origin(return_type) is tuple:
+            types = get_args(return_type)
+            return_type = warp.types.tuple_t(types=types, values=(None,) * len(types))
+
         # immediately allocate output variables so we can pass them into the dispatch method
         if return_type is None:
             # void function
@@ -1768,6 +1813,22 @@ class Adjoint:
                 out = adj.add_builtin_call("where", [cond, var1, var2])
                 adj.symbols[sym] = out
 
+    def emit_IfExp(adj, node):
+        cond = adj.eval(node.test)
+
+        if cond.constant is not None:
+            return adj.eval(node.body) if cond.constant else adj.eval(node.orelse)
+
+        adj.begin_if(cond)
+        body = adj.eval(node.body)
+        adj.end_if(cond)
+
+        adj.begin_else(cond)
+        orelse = adj.eval(node.orelse)
+        adj.end_else(cond)
+
+        return adj.add_builtin_call("where", [cond, body, orelse])
+
     def emit_Compare(adj, node):
         # node.left, node.ops (list of ops), node.comparators (things to compare to)
         # e.g. (left ops[0] node.comparators[0]) ops[1] node.comparators[1]
@@ -1824,7 +1885,7 @@ class Adjoint:
             if attr == "dtype":
                 return type_scalar_type(var_type)
             elif attr == "length":
-                return type_length(var_type)
+                return type_size(var_type)
 
         return getattr(var_type, attr, None)
 
@@ -2275,24 +2336,16 @@ class Adjoint:
                 else:
                     func = caller.default_constructor
 
+            # lambda function
+            if func is None and getattr(caller, "__name__", None) == "<lambda>":
+                raise NotImplementedError("Lambda expressions are not yet supported")
+
             if hasattr(caller, "_wp_type_args_"):
                 type_args = caller._wp_type_args_
 
             if func is None:
                 raise WarpCodegenError(
                     f"Could not find function {'.'.join(path)} as a built-in or user-defined function. Note that user functions must be annotated with a @wp.func decorator to be called from a kernel."
-                )
-
-        # Check if any argument correspond to an unsupported construct.
-        # Tuples are supported in the context of assigning multiple variables
-        # at once, but not in place of vectors when calling built-ins like
-        # `wp.length((1, 2, 3))`.
-        # Therefore, we need to catch this specific case here instead of
-        # more generally in `adj.eval()`.
-        for arg in node.args:
-            if isinstance(arg, ast.Tuple):
-                raise WarpCodegenError(
-                    "Tuple constructs are not supported in kernels. Use vectors like `wp.vec3()` instead."
                 )
 
         # get expected return count, e.g.: for multi-assignment
@@ -2304,7 +2357,6 @@ class Adjoint:
         args = tuple(adj.resolve_arg(x) for x in node.args)
         kwargs = {x.arg: adj.resolve_arg(x.value) for x in node.keywords}
 
-        # add the call and build the callee adjoint if needed (func.adj)
         out = adj.add_call(func, args, kwargs, type_args, min_outputs=min_outputs)
 
         if warp.config.verify_autograd_array_access:
@@ -2454,10 +2506,6 @@ class Adjoint:
                 raise WarpCodegenError(
                     "List constructs are not supported in kernels. Use vectors like `wp.vec3()` for small collections instead."
                 )
-            elif isinstance(node.value, ast.Tuple):
-                raise WarpCodegenError(
-                    "Tuple constructs are not supported in kernels. Use vectors like `wp.vec3()` for small collections instead."
-                )
 
         # handle the case where we are assigning multiple output variables
         if isinstance(lhs, ast.Tuple):
@@ -2472,6 +2520,17 @@ class Adjoint:
                 out = [adj.eval(v) for v in node.value.elts]
             else:
                 out = adj.eval(node.value)
+
+            subtype = getattr(out, "type", None)
+            if isinstance(subtype, warp.types.tuple_t):
+                if len(out.type.types) != len(lhs.elts):
+                    raise WarpCodegenError(
+                        f"Invalid number of values to unpack (expected {len(lhs.elts)}, got {len(out.type.types)})."
+                    )
+                target = out
+                out = tuple(
+                    adj.add_builtin_call("extract", (target, adj.add_constant(i))) for i in range(len(lhs.elts))
+                )
 
             names = []
             for v in lhs.elts:
@@ -2582,8 +2641,11 @@ class Adjoint:
                         f"Error, assigning to existing symbol {name} ({adj.symbols[name].type}) with different type ({rhs.type})"
                     )
 
-            # handle simple assignment case (a = b), where we generate a value copy rather than reference
-            if isinstance(node.value, ast.Name) or is_reference(rhs.type):
+            if isinstance(node.value, ast.Tuple):
+                out = rhs
+            elif isinstance(rhs, Sequence):
+                out = adj.add_builtin_call("tuple", rhs)
+            elif isinstance(node.value, ast.Name) or is_reference(rhs.type):
                 out = adj.add_builtin_call("copy", [rhs])
             else:
                 out = rhs
@@ -2637,7 +2699,9 @@ class Adjoint:
         elif isinstance(node.value, ast.Tuple):
             var = tuple(adj.eval(arg) for arg in node.value.elts)
         else:
-            var = (adj.eval(node.value),)
+            var = adj.eval(node.value)
+            if not isinstance(var, list) and not isinstance(var, tuple):
+                var = (var,)
 
         if adj.return_var is not None:
             old_ctypes = tuple(v.ctype(value_type=True) for v in adj.return_var)
@@ -2768,8 +2832,8 @@ class Adjoint:
             return
 
     def emit_Tuple(adj, node):
-        # LHS for expressions, such as i, j, k = 1, 2, 3
-        return tuple(adj.eval(x) for x in node.elts)
+        elements = tuple(adj.eval(x) for x in node.elts)
+        return adj.add_builtin_call("tuple", elements)
 
     def emit_Pass(adj, node):
         pass
@@ -2777,6 +2841,7 @@ class Adjoint:
     node_visitors: ClassVar[dict[type[ast.AST], Callable]] = {
         ast.FunctionDef: emit_FunctionDef,
         ast.If: emit_If,
+        ast.IfExp: emit_IfExp,
         ast.Compare: emit_Compare,
         ast.BoolOp: emit_BoolOp,
         ast.Name: emit_Name,
@@ -2880,7 +2945,7 @@ class Adjoint:
         if isinstance(value, warp.context.Function):
             return True
 
-        def verify_struct(s: StructInstance, attr_path: List[str]):
+        def verify_struct(s: StructInstance, attr_path: list[str]):
             for key in s._cls.vars.keys():
                 v = getattr(s, key)
                 if issubclass(type(v), StructInstance):
@@ -2899,7 +2964,8 @@ class Adjoint:
         raise ValueError(f"value of type {type(value)} cannot be constructed inside Warp kernels")
 
     # find the source code string of an AST node
-    def extract_node_source(adj, node) -> str | None:
+    @staticmethod
+    def extract_node_source_from_lines(source_lines, node) -> str | None:
         if not hasattr(node, "lineno") or not hasattr(node, "col_offset"):
             return None
 
@@ -2915,12 +2981,12 @@ class Adjoint:
             end_line = start_line
             end_col = start_col
             parenthesis_count = 1
-            for lineno in range(start_line, len(adj.source_lines)):
+            for lineno in range(start_line, len(source_lines)):
                 if lineno == start_line:
                     c_start = start_col
                 else:
                     c_start = 0
-                line = adj.source_lines[lineno]
+                line = source_lines[lineno]
                 for i in range(c_start, len(line)):
                     c = line[i]
                     if c == "(":
@@ -2936,21 +3002,57 @@ class Adjoint:
 
         if start_line == end_line:
             # single-line expression
-            return adj.source_lines[start_line][start_col:end_col]
+            return source_lines[start_line][start_col:end_col]
         else:
             # multi-line expression
             lines = []
             # first line (from start_col to the end)
-            lines.append(adj.source_lines[start_line][start_col:])
+            lines.append(source_lines[start_line][start_col:])
             # middle lines (entire lines)
-            lines.extend(adj.source_lines[start_line + 1 : end_line])
+            lines.extend(source_lines[start_line + 1 : end_line])
             # last line (from the start to end_col)
-            lines.append(adj.source_lines[end_line][:end_col])
+            lines.append(source_lines[end_line][:end_col])
             return "\n".join(lines).strip()
+
+    @staticmethod
+    def extract_lambda_source(func, only_body=False) -> str | None:
+        try:
+            source_lines = inspect.getsourcelines(func)[0]
+            source_lines[0] = source_lines[0][source_lines[0].index("lambda") :]
+        except OSError as e:
+            raise WarpCodegenError(
+                "Could not access lambda function source code. Please use a named function instead."
+            ) from e
+        source = "".join(source_lines)
+        source = source[source.index("lambda") :].rstrip()
+        # Remove trailing unbalanced parentheses
+        while source.count("(") < source.count(")"):
+            source = source[:-1]
+        # extract lambda expression up until a comma, e.g. in the case of
+        # "map(lambda a: (a + 2.0, a + 3.0), a, return_kernel=True)"
+        si = max(source.find(")"), source.find(":"))
+        ci = source.find(",", si)
+        if ci != -1:
+            source = source[:ci]
+        tree = ast.parse(source)
+        lambda_source = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Lambda):
+                if only_body:
+                    # extract the body of the lambda function
+                    lambda_source = Adjoint.extract_node_source_from_lines(source_lines, node.body)
+                else:
+                    # extract the entire lambda function
+                    lambda_source = Adjoint.extract_node_source_from_lines(source_lines, node)
+                    break
+        return lambda_source
+
+    def extract_node_source(adj, node) -> str | None:
+        return adj.extract_node_source_from_lines(adj.source_lines, node)
 
     # handles a wp.static() expression and returns the resulting object and a string representing the code
     # of the static expression
-    def evaluate_static_expression(adj, node) -> Tuple[Any, str]:
+    def evaluate_static_expression(adj, node) -> tuple[Any, str]:
         if len(node.args) == 1:
             static_code = adj.extract_node_source(node.args[0])
         elif len(node.keywords) == 1:
@@ -2970,29 +3072,14 @@ class Adjoint:
 
         # Replace all constant `len()` expressions with their value.
         if "len" in static_code:
-
-            def eval_len(obj):
-                if type_is_vector(obj):
-                    return obj._length_
-                elif type_is_quaternion(obj):
-                    return obj._length_
-                elif type_is_matrix(obj):
-                    return obj._shape_[0]
-                elif type_is_transformation(obj):
-                    return obj._length_
-                elif is_tile(obj):
-                    return obj.shape[0]
-
-                return len(obj)
-
             len_expr_ctx = vars_dict.copy()
             constant_types = {k: v.type for k, v in adj.symbols.items() if isinstance(v, Var) and v.type is not None}
             len_expr_ctx.update(constant_types)
-            len_expr_ctx.update({"len": eval_len})
+            len_expr_ctx.update({"len": warp.types.type_length})
 
             # We want to replace the expression code in-place,
             # so reparse it to get the correct column info.
-            len_value_locs: List[Tuple[int, int, int]] = []
+            len_value_locs: list[tuple[int, int, int]] = []
             expr_tree = ast.parse(static_code)
             assert len(expr_tree.body) == 1 and isinstance(expr_tree.body[0], ast.Expr)
             expr_root = expr_tree.body[0].value

@@ -45,6 +45,7 @@ Length = TypeVar("Length", bound=int)
 Rows = TypeVar("Rows")
 Cols = TypeVar("Cols")
 DType = TypeVar("DType")
+Shape = TypeVar("Shape", bound=Tuple[int, ...])
 
 Int = TypeVar("Int")
 Float = TypeVar("Float")
@@ -72,14 +73,92 @@ class Array(Generic[DType]):
     dtype: type
     size: int
 
+    def __add__(self, other) -> array:
+        return warp.map(warp.add, self, other)  # type: ignore
 
-int_tuple_type_hints = {
-    Tuple[int]: 1,
-    Tuple[int, int]: 2,
-    Tuple[int, int, int]: 3,
-    Tuple[int, int, int, int]: 4,
-    Tuple[int, ...]: -1,
-}
+    def __radd__(self, other) -> array:
+        return warp.map(warp.add, other, self)  # type: ignore
+
+    def __sub__(self, other) -> array:
+        return warp.map(warp.sub, self, other)  # type: ignore
+
+    def __rsub__(self, other) -> array:
+        return warp.map(warp.sub, other, self)  # type: ignore
+
+    def __mul__(self, other) -> array:
+        return warp.map(warp.mul, self, other)  # type: ignore
+
+    def __rmul__(self, other) -> array:
+        return warp.map(warp.mul, other, self)  # type: ignore
+
+    def __truediv__(self, other) -> array:
+        return warp.map(warp.div, self, other)  # type: ignore
+
+    def __rtruediv__(self, other) -> array:
+        return warp.map(warp.div, other, self)  # type: ignore
+
+    def __floordiv__(self, other) -> array:
+        return warp.map(warp.floordiv, self, other)  # type: ignore
+
+    def __rfloordiv__(self, other) -> array:
+        return warp.map(warp.floordiv, other, self)  # type: ignore
+
+    def __mod__(self, other) -> array:
+        return warp.map(warp.mod, self, other)  # type: ignore
+
+    def __rmod__(self, other) -> array:
+        return warp.map(warp.mod, other, self)  # type: ignore
+
+    def __pow__(self, other) -> array:
+        return warp.map(warp.pow, self, other)  # type: ignore
+
+    def __rpow__(self, other) -> array:
+        return warp.map(warp.pow, other, self)  # type: ignore
+
+    def __neg__(self) -> array:
+        return warp.map(warp.neg, self)  # type: ignore
+
+    def __pos__(self) -> array:
+        return warp.map(warp.pos, self)  # type: ignore
+
+    def __iadd__(self, other):
+        """In-place addition operator."""
+        warp.map(warp.add, self, other, out=self)
+        return self
+
+    def __isub__(self, other):
+        """In-place subtraction operator."""
+        warp.map(warp.sub, self, other, out=self)
+        return self
+
+    def __imul__(self, other):
+        """In-place multiplication operator."""
+        warp.map(warp.mul, self, other, out=self)
+        return self
+
+    def __itruediv__(self, other):
+        """In-place division operator."""
+        warp.map(warp.div, self, other, out=self)
+        return self
+
+    def __ifloordiv__(self, other):
+        """In-place floor division operator."""
+        warp.map(warp.floordiv, self, other, out=self)
+        return self
+
+    def __imod__(self, other):
+        """In-place modulo operator."""
+        warp.map(warp.mod, self, other, out=self)
+        return self
+
+    def __ipow__(self, other):
+        """In-place power operator."""
+        warp.map(warp.pow, self, other, out=self)
+        return self
+
+
+class Tile(Generic[DType, Shape]):
+    pass
 
 
 def constant(x):
@@ -101,6 +180,13 @@ def float_to_half_bits(value):
 
 def half_bits_to_float(value):
     return warp.context.runtime.core.half_bits_to_float(value)
+
+
+def safe_len(obj):
+    try:
+        return len(obj)
+    except TypeError:
+        return -1
 
 
 # ----------------------
@@ -280,7 +366,7 @@ def vector(length, dtype):
             return f"{type_repr(self)}([{', '.join(map(repr, self))}])"
 
         def __eq__(self, other):
-            if self._length_ != len(other):
+            if self._length_ != safe_len(other):
                 return False
             for i in range(self._length_):
                 if self[i] != other[i]:
@@ -424,10 +510,10 @@ def matrix(shape, dtype):
             return "[" + ",\n ".join(row_str) + "]"
 
         def __eq__(self, other):
-            if self._shape_[0] != len(other):
+            if self._shape_[0] != safe_len(other):
                 return False
             for i in range(self._shape_[0]):
-                if self._shape_[1] != len(other[i]):
+                if self._shape_[1] != safe_len(other[i]):
                     return False
                 for j in range(self._shape_[1]):
                     if self[i][j] != other[i][j]:
@@ -730,7 +816,7 @@ def transformation(dtype=Any):
                 super().__init__(*args)
                 return
 
-            # Even if the arguments match the original “from components”
+            # Even if the arguments match the original "from components"
             # signature, we still need to make sure that they represent
             # sequences that can be unpacked.
             if hasattr(p, "__len__") and hasattr(q, "__len__"):
@@ -1108,6 +1194,39 @@ def dtype_to_numpy(warp_dtype):
         raise TypeError(f"Cannot convert {warp_dtype} to a NumPy type")
 
 
+np_dtype_compatible_sets: dict[np.dtype, set[Any]] = {
+    np.dtype(np.bool_): {bool, int8, uint8},
+    np.dtype(np.int8): {int8, uint8},
+    np.dtype(np.uint8): {int8, uint8},
+    np.dtype(np.int16): {int16, uint16},
+    np.dtype(np.uint16): {int16, uint16},
+    np.dtype(np.int32): {int32, uint32},
+    np.dtype(np.int64): {int64, uint64},
+    np.dtype(np.uint32): {int32, uint32},
+    np.dtype(np.uint64): {int64, uint64},
+    np.dtype(np.byte): {bool, int8, uint8},
+    np.dtype(np.ubyte): {bool, int8, uint8},
+    np.dtype(np.float16): {float16},
+    np.dtype(np.float32): {float32},
+    np.dtype(np.float64): {float64},
+}
+
+
+def np_dtype_is_compatible(numpy_dtype: np.dtype, warp_dtype) -> builtins.bool:
+    """Evaluate whether the given NumPy dtype is compatible with the given Warp dtype."""
+
+    compatible_set: set[Any] | None = np_dtype_compatible_sets.get(numpy_dtype)
+
+    if compatible_set is not None:
+        if warp_dtype in compatible_set:
+            return True
+        # check if it's a vector or matrix type
+        if hasattr(warp_dtype, "_wp_scalar_type_"):
+            return warp_dtype._wp_scalar_type_ in compatible_set
+
+    return False
+
+
 # represent a Python range iterator
 class range_t:
     def __init__(self):
@@ -1115,36 +1234,24 @@ class range_t:
 
 
 # definition just for kernel type (cannot be a parameter), see bvh.h
-class bvh_query_t:
+class BvhQuery:
     """Object used to track state during BVH traversal."""
 
-    def __init__(self):
-        pass
-
-
-BvhQuery = bvh_query_t
+    _wp_native_name_ = "bvh_query_t"
 
 
 # definition just for kernel type (cannot be a parameter), see mesh.h
-class mesh_query_aabb_t:
+class MeshQueryAABB:
     """Object used to track state during mesh traversal."""
 
-    def __init__(self):
-        pass
-
-
-MeshQueryAABB = mesh_query_aabb_t
+    _wp_native_name_ = "mesh_query_aabb_t"
 
 
 # definition just for kernel type (cannot be a parameter), see hash_grid.h
-class hash_grid_query_t:
+class HashGridQuery:
     """Object used to track state during neighbor traversal."""
 
-    def __init__(self):
-        pass
-
-
-HashGridQuery = hash_grid_query_t
+    _wp_native_name_ = "hash_grid_query_t"
 
 
 # maximum number of dimensions, must match array.h
@@ -1259,6 +1366,14 @@ class indexedarray_t(ctypes.Structure):
                 self.shape[i] = shape[i]
 
 
+class tuple_t:
+    """Used during codegen to store multiple values into a single variable."""
+
+    def __init__(self, types, values):
+        self.types = types
+        self.values = values
+
+
 def type_ctype(dtype):
     if dtype == float:
         return ctypes.c_float
@@ -1273,7 +1388,22 @@ def type_ctype(dtype):
         return dtype._type_
 
 
-def type_length(dtype):
+def type_length(obj):
+    if is_tile(obj):
+        return obj.shape[0]
+    elif is_tuple(obj):
+        return len(obj.types)
+    elif get_origin(obj) is tuple:
+        return len(get_args(obj))
+    elif hasattr(obj, "_shape_"):
+        return obj._shape_[0]
+    elif hasattr(obj, "_length_"):
+        return obj._length_
+
+    return len(obj)
+
+
+def type_size(dtype):
     if dtype == float or dtype == int or isinstance(dtype, warp.codegen.Struct):
         return 1
     else:
@@ -1379,12 +1509,14 @@ def scalar_short_name(t):
 
 
 # converts any known type to a human readable string, good for error messages, reporting etc
-def type_repr(t):
+def type_repr(t) -> str:
     if is_array(t):
         if t.device is None:
             # array is used as a type annotation - display ndim instead of shape
             return f"array(ndim={t.ndim}, dtype={type_repr(t.dtype)})"
         return f"array(shape={t.shape}, dtype={type_repr(t.dtype)})"
+    if is_tuple(t):
+        return f"tuple({', '.join(type_repr(x) for x in t.types)})"
     if is_tile(t):
         return f"tile(shape={t.shape}, dtype={type_repr(t.dtype)})"
     if isinstance(t, warp.codegen.Struct):
@@ -1410,6 +1542,12 @@ def type_repr(t):
         return f"matrix(shape=({t._shape_[0]}, {t._shape_[1]}), dtype={type_repr(t._wp_scalar_type_)})"
     if t in scalar_types:
         return t.__name__
+    if t == builtins.bool:
+        return "bool"
+    if t == builtins.float:
+        return "float"
+    if t == builtins.int:
+        return "int"
 
     name = getattr(t, "__name__", None)
     if name is None:
@@ -1478,6 +1616,10 @@ def is_array(a) -> builtins.bool:
     return isinstance(a, array_types)
 
 
+def is_tuple(t) -> builtins.bool:
+    return isinstance(t, tuple_t)
+
+
 def scalars_equal(a, b, match_generic=False):
     # convert to canonical types
     if a == float:
@@ -1519,45 +1661,56 @@ def scalars_equal(a, b, match_generic=False):
     return a == b
 
 
-def types_equal(a, b, match_generic=False):
-    if match_generic:
-        # Special cases to interpret the types listed in `int_tuple_type_hints`
-        # as generic hints that accept any integer types.
-        if a in int_tuple_type_hints and isinstance(b, Sequence):
-            a_length = int_tuple_type_hints[a]
-            if (a_length == -1 or a_length == len(b)) and all(
-                scalars_equal(x, Int, match_generic=match_generic) for x in b
-            ):
-                return True
-        if b in int_tuple_type_hints and isinstance(a, Sequence):
-            b_length = int_tuple_type_hints[b]
-            if (b_length == -1 or b_length == len(a)) and all(
-                scalars_equal(x, Int, match_generic=match_generic) for x in a
-            ):
-                return True
-        if a in int_tuple_type_hints and b in int_tuple_type_hints:
-            a_length = int_tuple_type_hints[a]
-            b_length = int_tuple_type_hints[b]
-            if a_length is None or b_length is None or a_length == b_length:
-                return True
+def seq_match_ellipsis(a, b, match_generic=False) -> bool:
+    assert a and a[-1] is Ellipsis and len(a) == 2
 
+    # Compare the args against the type being repeated through the ellipsis.
+    repeated_arg = a[0]
+    if not all(types_equal(x, repeated_arg, match_generic=match_generic) for x in b):
+        return False
+
+    return True
+
+
+def types_equal(a, b, match_generic=False):
     a_origin = get_origin(a)
     b_origin = get_origin(b)
-    if a_origin is tuple and b_origin is tuple:
-        a_args = get_args(a)
-        b_args = get_args(b)
-        if len(a_args) == len(b_args) and all(
-            scalars_equal(x, y, match_generic=match_generic) for x, y in zip(a_args, b_args)
-        ):
+
+    a_is_tuple = True
+    if is_tuple(a):
+        a = a.types
+    elif a_origin is tuple:
+        a = get_args(a)
+    else:
+        a_is_tuple = False
+
+    b_is_tuple = True
+    if is_tuple(b):
+        b = b.types
+    elif b_origin is tuple:
+        b = get_args(b)
+    else:
+        b_is_tuple = False
+
+    if isinstance(a, Sequence) and isinstance(b, Sequence):
+        if (not a and a_is_tuple) or (not b and b_is_tuple):
+            # We have a bare tuple definition like `Tuple`, which matches to anything.
             return True
-    elif a_origin is tuple and isinstance(b, Sequence):
-        a_args = get_args(a)
-        if len(a_args) == len(b) and all(scalars_equal(x, y, match_generic=match_generic) for x, y in zip(a_args, b)):
-            return True
-    elif b_origin is tuple and isinstance(a, Sequence):
-        b_args = get_args(b)
-        if len(b_args) == len(a) and all(scalars_equal(x, y, match_generic=match_generic) for x, y in zip(b_args, a)):
-            return True
+
+        a_has_ellipsis = a and a[-1] is Ellipsis
+        b_has_ellipsis = b and b[-1] is Ellipsis
+        if a_has_ellipsis and b_has_ellipsis:
+            # Delegate to comparing all the elements using the standard approach.
+            pass
+        elif a_has_ellipsis:
+            return seq_match_ellipsis(a, b, match_generic=match_generic)
+        elif b_has_ellipsis:
+            return seq_match_ellipsis(b, a, match_generic=match_generic)
+
+        return len(a) == len(b) and all(types_equal(x, y, match_generic=match_generic) for x, y in zip(a, b))
+    elif isinstance(a, Sequence) or isinstance(b, Sequence):
+        # A sequence can only match to another sequence.
+        return False
 
     # convert to canonical types
     if a == float:
@@ -1869,6 +2022,14 @@ class array(Array[DType]):
 
             if dtype == Any:
                 dtype = np_dtype_to_warp_type[data_dtype]
+            else:
+                # Warn if the data type is compatible with the requested dtype
+                if not np_dtype_is_compatible(data_dtype, dtype):
+                    warp.utils.warn(
+                        f"The input data type {data_dtype} does not appear to be "
+                        f"compatible with the requested dtype {dtype}. If "
+                        "data-type sizes do not match, then this may lead to memory-access violations."
+                    )
 
             if data_strides is None:
                 data_strides = strides_from_shape(data_shape, dtype)
@@ -3257,14 +3418,32 @@ def array_type_id(a):
         raise ValueError("Invalid array type")
 
 
-# tile object
-class Tile:
+class tile(Tile[DType, Shape]):
+    """A Warp tile object.
+
+    Attributes:
+        dtype (DType): The data type of the tile
+        shape (Shape): Dimensions of the tile
+        storage (str): 'register' or 'shared' memory storage
+        layout (str): 'rowmajor' or 'colmajor' layout
+        strides (tuple[int]): Number of tile elements between successive tile entries in each dimension
+        size (int): Total number of tile elements
+        owner (bool): Whether this tile aliases or owns its data
+    """
+
     alignment = 16
 
-    def __init__(self, dtype, shape, op=None, storage="register", layout="rowmajor", strides=None, owner=True):
+    def __init__(
+        self,
+        dtype: Any,
+        shape: tuple[int, ...] | list[int],
+        storage: str = "register",
+        layout: str = "rowmajor",
+        strides: tuple[int, ...] | None = None,
+        owner: builtins.bool = True,
+    ):
         self.dtype = type_to_warp(dtype)
         self.shape = shape
-        self.op = op
         self.storage = storage
         self.layout = layout
         self.strides = strides
@@ -3324,76 +3503,15 @@ class Tile:
 
     @staticmethod
     def round_up(bytes):
-        return ((bytes + Tile.alignment - 1) // Tile.alignment) * Tile.alignment
+        return ((bytes + tile.alignment - 1) // tile.alignment) * tile.alignment
 
     # align tile size to natural boundary, default 16-bytes
     def align(self, bytes):
-        return Tile.round_up(bytes)
-
-
-class TileZeros(Tile):
-    def __init__(self, dtype, shape, storage="register"):
-        Tile.__init__(self, dtype, shape, op="zeros", storage=storage)
-
-
-class TileOnes(Tile):
-    def __init__(self, dtype, shape, storage="register"):
-        Tile.__init__(self, dtype, shape, op="ones", storage=storage)
-
-
-class TileRange(Tile):
-    def __init__(self, dtype, start, stop, step, storage="register"):
-        self.start = start
-        self.stop = stop
-        self.step = step
-
-        n = int((stop - start) / step)
-
-        Tile.__init__(self, dtype, shape=(n,), op="arange", storage=storage)
-
-
-class TileConstant(Tile):
-    def __init__(self, dtype, shape):
-        Tile.__init__(self, dtype, shape, op="constant", storage="register")
-
-
-class TileLoad(Tile):
-    def __init__(self, array, shape, storage="register"):
-        Tile.__init__(self, array.dtype, shape, op="load", storage=storage)
-
-
-class TileUnaryMap(Tile):
-    def __init__(self, t, dtype=None, storage="register"):
-        Tile.__init__(self, dtype, t.shape, op="unary_map", storage=storage)
-
-        # if no output dtype specified then assume it's the same as the first arg
-        if self.dtype is None:
-            self.dtype = t.dtype
-
-        self.t = t
-
-
-class TileBinaryMap(Tile):
-    def __init__(self, a, b, dtype=None, storage="register"):
-        Tile.__init__(self, dtype, a.shape, op="binary_map", storage=storage)
-
-        # if no output dtype specified then assume it's the same as the first arg
-        if self.dtype is None:
-            self.dtype = a.dtype
-
-        self.a = a
-        self.b = b
-
-
-class TileShared(Tile):
-    def __init__(self, t):
-        Tile.__init__(self, t.dtype, t.shape, "shared", storage="shared")
-
-        self.t = t
+        return tile.round_up(bytes)
 
 
 def is_tile(t):
-    return isinstance(t, Tile)
+    return isinstance(t, tile)
 
 
 bvh_constructor_values = {"sah": 0, "median": 1, "lbvh": 2}
@@ -4621,15 +4739,15 @@ def _is_contiguous_vec_like_array(array, vec_length: int, scalar_types: tuple[ty
         return False
     if type_scalar_type(array.dtype) not in scalar_types:
         return False
-    return (array.ndim == 1 and type_length(array.dtype) == vec_length) or (
-        array.ndim == 2 and array.shape[1] == vec_length and type_length(array.dtype) == 1
+    return (array.ndim == 1 and type_size(array.dtype) == vec_length) or (
+        array.ndim == 2 and array.shape[1] == vec_length and type_size(array.dtype) == 1
     )
 
 
 # definition just for kernel type (cannot be a parameter), see mesh.h
-# NOTE: its layout must match the corresponding struct defined in C.
+# NOTE: its layout must match the mesh_query_point_t struct defined in C.
 # NOTE: it needs to be defined after `indexedarray` to workaround a circular import issue.
-class mesh_query_point_t:
+class MeshQueryPoint:
     """Output for the mesh query point functions.
 
     Attributes:
@@ -4649,6 +4767,8 @@ class mesh_query_point_t:
 
     from warp.codegen import Var
 
+    _wp_native_name_ = "mesh_query_point_t"
+
     vars: ClassVar[dict[str, Var]] = {
         "result": Var("result", bool),
         "sign": Var("sign", float32),
@@ -4658,12 +4778,9 @@ class mesh_query_point_t:
     }
 
 
-MeshQueryPoint = mesh_query_point_t
-
-
 # definition just for kernel type (cannot be a parameter), see mesh.h
-# NOTE: its layout must match the corresponding struct defined in C.
-class mesh_query_ray_t:
+# NOTE: its layout must match the mesh_query_ray_t struct defined in C.
+class MeshQueryRay:
     """Output for the mesh query ray functions.
 
     Attributes:
@@ -4681,6 +4798,8 @@ class mesh_query_ray_t:
 
     from warp.codegen import Var
 
+    _wp_native_name_ = "mesh_query_ray_t"
+
     vars: ClassVar[dict[str, Var]] = {
         "result": Var("result", bool),
         "sign": Var("sign", float32),
@@ -4690,9 +4809,6 @@ class mesh_query_ray_t:
         "v": Var("v", float32),
         "normal": Var("normal", vec3),
     }
-
-
-MeshQueryRay = mesh_query_ray_t
 
 
 def matmul(
@@ -5153,10 +5269,6 @@ def infer_argument_types(args, template_types, arg_names=None):
         elif issubclass(arg_type, warp.codegen.StructInstance):
             # a struct
             arg_types.append(arg._cls)
-        # elif arg_type in [warp.types.launch_bounds_t, warp.types.shape_t, warp.types.range_t]:
-        #     arg_types.append(arg_type)
-        # elif arg_type in [warp.hash_grid_query_t, warp.mesh_query_aabb_t, warp.mesh_query_point_t, warp.mesh_query_ray_t, warp.bvh_query_t]:
-        #     arg_types.append(arg_type)
         elif arg is None:
             # allow passing None for arrays
             t = template_types[i]
@@ -5191,11 +5303,11 @@ simple_type_codes = {
     shape_t: "sh",
     range_t: "rg",
     launch_bounds_t: "lb",
-    hash_grid_query_t: "hgq",
-    mesh_query_aabb_t: "mqa",
-    mesh_query_point_t: "mqp",
-    mesh_query_ray_t: "mqr",
-    bvh_query_t: "bvhq",
+    HashGridQuery: "hgq",
+    MeshQueryAABB: "mqa",
+    MeshQueryPoint: "mqp",
+    MeshQueryRay: "mqr",
+    BvhQuery: "bvhq",
 }
 
 
@@ -5245,8 +5357,17 @@ def get_type_code(arg_type: type) -> str:
         return f"fa{arg_type.ndim}{get_type_code(arg_type.dtype)}"
     elif isinstance(arg_type, indexedfabricarray):
         return f"ifa{arg_type.ndim}{get_type_code(arg_type.dtype)}"
+    elif get_origin(arg_type) is tuple:
+        arg_types = get_args(arg_type)
+        return f"tpl{len(arg_types)}{''.join(get_type_code(x) for x in arg_types)}"
+    elif isinstance(arg_type, tuple_t):
+        return f"tplt{len(arg_type.types)}{''.join(get_type_code(x) for x in arg_type.types)}"
     elif isinstance(arg_type, warp.codegen.Struct):
         return arg_type.native_name
+    elif isinstance(arg_type, tile):
+        shape_string = "".join(str(num) for num in arg_type.shape)
+        storage = "s" if arg_type.storage == "shared" else "r"
+        return f"t{storage}{shape_string}{get_type_code(arg_type.dtype)}"
     elif arg_type == Scalar:
         # generic scalar type
         return "s?"
@@ -5259,6 +5380,8 @@ def get_type_code(arg_type: type) -> str:
     elif isinstance(arg_type, Callable):
         # TODO: elaborate on Callable type?
         return "c"
+    elif arg_type is Ellipsis:
+        return "?"
     else:
         raise TypeError(f"Unrecognized type '{arg_type}'")
 

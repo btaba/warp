@@ -501,6 +501,10 @@ def _test_cell_lookup(s: fem.Sample, domain: fem.Domain, cell_filter: wp.array(d
         coord_proj, _sq_dist = fem.element_closest_point(domain, s_filter.element_index, pos_f)
         wp.expect_near(coord_proj, s_filter.element_coords, 0.001)
 
+    # test that extrapolated coordinates yield bak correct position
+    s_filter.element_coords = fem.element_coordinates(domain, s_filter.element_index, pos)
+    wp.expect_near(domain(s_filter), pos, 0.001)
+
 
 @fem.integrand(kernel_options={"enable_backward": False, "max_unroll": 1})
 def _test_geo_sides(
@@ -829,14 +833,14 @@ def _rigid_deformation_field(s: Sample, domain: Domain, translation: wp.vec3, ro
 def test_deformed_geometry(test, device):
     N = 3
 
+    translation = [1.0, 2.0, 3.0]
+    rotation = [0.0, math.pi / 4.0, 0.0]
+    scale = 2.0
+
     with wp.ScopedDevice(device):
         positions, tet_vidx = _gen_tetmesh(N, N, N)
 
         geo = fem.Tetmesh(tet_vertex_indices=tet_vidx, positions=positions)
-
-        translation = [1.0, 2.0, 3.0]
-        rotation = [0.0, math.pi / 4.0, 0.0]
-        scale = 2.0
 
         vector_space = fem.make_polynomial_space(geo, dtype=wp.vec3, degree=2)
         pos_field = vector_space.make_field()
@@ -890,6 +894,15 @@ def test_deformed_geometry(test, device):
             ],
         )
 
+
+def test_deformed_geometry_codimensional(test, device):
+    N = 3
+
+    translation = [1.0, 2.0, 3.0]
+    rotation = [0.0, math.pi / 4.0, 0.0]
+    scale = 2.0
+
+    with wp.ScopedDevice(device):
         # Test with Trimesh3d (different space and cell dimensions)
         positions, tri_vidx = _gen_trimesh(N, N)
         positions = positions.numpy()
@@ -909,7 +922,9 @@ def test_deformed_geometry(test, device):
         deformed_geo = pos_field.make_deformed_geometry()
 
         @wp.kernel
-        def _test_deformed_geometry_normal(geo_arg: geo.CellArg, def_arg: deformed_geo.CellArg, rotation: wp.vec3):
+        def _test_deformed_geometry_normal_codimensional(
+            geo_arg: geo.CellArg, def_arg: deformed_geo.CellArg, rotation: wp.vec3
+        ):
             i = wp.tid()
 
             s = make_free_sample(i, Coords(0.5, 0.5, 0.0))
@@ -920,7 +935,7 @@ def test_deformed_geometry(test, device):
             wp.expect_near(wp.quat_rotate(q, geo_n), def_n, 0.001)
 
         wp.launch(
-            _test_deformed_geometry_normal,
+            _test_deformed_geometry_normal_codimensional,
             dim=geo.cell_count(),
             inputs=[
                 geo.cell_arg_value(wp.get_device()),
@@ -2064,6 +2079,9 @@ add_function_test(TestFem, "test_hex_mesh", test_hex_mesh, devices=devices)
 add_function_test(TestFem, "test_nanogrid", test_nanogrid, devices=cuda_devices)
 add_function_test(TestFem, "test_adaptive_nanogrid", test_adaptive_nanogrid, devices=cuda_devices)
 add_function_test(TestFem, "test_deformed_geometry", test_deformed_geometry, devices=devices)
+add_function_test(
+    TestFem, "test_deformed_geometry_codimensional", test_deformed_geometry_codimensional, devices=devices
+)
 add_function_test(TestFem, "test_vector_spaces", test_vector_spaces, devices=devices)
 add_function_test(TestFem, "test_dof_mapper", test_dof_mapper)
 add_function_test(TestFem, "test_point_basis", test_point_basis)

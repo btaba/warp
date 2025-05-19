@@ -435,13 +435,7 @@ def test_error_collection_construct(test, device):
         x = [1.0, 2.0, 3.0]
 
     def kernel_2_fn():
-        x = (1.0, 2.0, 3.0)
-
-    def kernel_3_fn():
         x = {"a": 1.0, "b": 2.0, "c": 3.0}
-
-    def kernel_4_fn():
-        wp.length((1.0, 2.0, 3.0))
 
     kernel = wp.Kernel(func=kernel_1_fn)
     with test.assertRaisesRegex(
@@ -451,20 +445,7 @@ def test_error_collection_construct(test, device):
         wp.launch(kernel, dim=1, device=device)
 
     kernel = wp.Kernel(func=kernel_2_fn)
-    with test.assertRaisesRegex(
-        RuntimeError,
-        r"Tuple constructs are not supported in kernels. Use vectors like `wp.vec3\(\)` for small collections instead.",
-    ):
-        wp.launch(kernel, dim=1, device=device)
-
-    kernel = wp.Kernel(func=kernel_3_fn)
     with test.assertRaisesRegex(RuntimeError, r"Construct `ast.Dict` not supported in kernels."):
-        wp.launch(kernel, dim=1, device=device)
-
-    kernel = wp.Kernel(func=kernel_4_fn)
-    with test.assertRaisesRegex(
-        RuntimeError, r"Tuple constructs are not supported in kernels. Use vectors like `wp.vec3\(\)` instead."
-    ):
         wp.launch(kernel, dim=1, device=device)
 
 
@@ -691,6 +672,22 @@ def test_codegen_return_in_kernel(test, device):
     wp.launch(conditional_return_or_sum, dim=grid_size, inputs=[result], block_dim=256, max_blocks=1, device=device)
 
     test.assertEqual(result.numpy()[0], grid_size - 256)
+
+
+@wp.kernel
+def conditional_ifexp(x: float, result: wp.array(dtype=wp.int32)):
+    wp.atomic_add(result, 0, 1) if x > 0.0 else wp.atomic_add(result, 1, 1)
+
+
+def test_ifexp_only_executes_one_branch(test, device):
+    result = wp.zeros(2, dtype=wp.int32, device=device)
+
+    wp.launch(conditional_ifexp, dim=1, inputs=[1.0, result], device=device)
+
+    values = result.numpy()
+    # Only first branch is taken
+    test.assertEqual(values[0], 1)
+    test.assertEqual(values[1], 0)
 
 
 @wp.kernel
@@ -941,6 +938,9 @@ add_kernel_test(TestCodeGen, name="test_call_syntax", kernel=test_call_syntax, d
 add_kernel_test(TestCodeGen, name="test_shadow_builtin", kernel=test_shadow_builtin, dim=1, devices=devices)
 add_kernel_test(TestCodeGen, name="test_while_condition_eval", kernel=test_while_condition_eval, dim=1, devices=devices)
 add_function_test(TestCodeGen, "test_codegen_return_in_kernel", test_codegen_return_in_kernel, devices=devices)
+add_function_test(
+    TestCodeGen, "test_ifexp_only_executes_one_branch", test_ifexp_only_executes_one_branch, devices=devices
+)
 add_function_test(
     TestCodeGen,
     func=test_multiple_return_values,
