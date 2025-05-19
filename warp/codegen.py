@@ -3486,6 +3486,9 @@ def indent(args, stops=1):
 
 # generates a C function name based on the python function name
 def make_full_qualified_name(func: Union[str, Callable]) -> str:
+    if isinstance(func, functools.partial):
+        original_func = func.func
+        return make_full_qualified_name(original_func)
     if not isinstance(func, str):
         func = func.__qualname__
     return re.sub("[^0-9a-zA-Z_]+", "", func.replace(".", "__"))
