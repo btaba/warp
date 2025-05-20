@@ -358,6 +358,8 @@ class FfiCallable:
                 if arg.is_array:
                     if arg_idx < self.num_inputs and self.first_array_arg is None:
                         self.first_array_arg = arg_idx
+                elif arg.is_vector:
+                    pass
                 else:
                     self.has_static_args = True
                 self.args.append(arg)
@@ -522,6 +524,10 @@ class FfiCallable:
                     buffer = inputs[i].contents
                     shape = buffer.dims[: buffer.rank - arg.dtype_ndim]
                     arr = wp.array(ptr=buffer.data, dtype=arg.type.dtype, shape=shape, device=device)
+                    arg_list.append(arr)
+                elif arg.is_vector:
+                    buffer = inputs[i].contents
+                    arr = wp.array(ptr=buffer.data, dtype=arg.type._wp_scalar_type_, shape=arg.dtype_shape, device=device)
                     arg_list.append(arr)
                 else:
                     # scalar argument, get stashed value
