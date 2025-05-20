@@ -33,6 +33,7 @@ class FfiArg:
         self.name = name
         self.type = type
         self.is_array = isinstance(type, wp.array)
+        self.is_vector = type in wp.types.vector_types and hasattr(type, "_wp_scalar_type_")
 
         if self.is_array:
             if hasattr(type.dtype, "_wp_scalar_type_"):
@@ -54,6 +55,12 @@ class FfiArg:
             self.jax_scalar_type = wp.dtype_to_jax(type_to_warp(type))
             self.jax_ndim = 0
             self.warp_ndim = 0
+        elif self.is_vector:
+            self.dtype_shape = type._shape_
+            self.dtype_ndim = 1
+            self.jax_scalar_type = wp.dtype_to_jax(type_to_warp(type._wp_scalar_type_))
+            self.jax_ndim = 1
+            self.warp_ndim = 1
         else:
             raise TypeError(f"Invalid type for argument '{name}', expected array or scalar, got {type}")
 
@@ -143,6 +150,22 @@ class FfiKernel:
                         raise TypeError(
                             f"Invalid inner dimensions for array argument '{input_arg.name}', expected {input_arg.dtype_shape}, got {input_value.shape[-input_arg.dtype_ndim :]}"
                         )
+            elif input_arg.is_vector:
+                # check dtype
+                if input_value.dtype != input_arg.jax_scalar_type:
+                    raise TypeError(
+                        f"Invalid data type for vector argument '{input_arg.name}', expected {input_arg.jax_scalar_type}, got {input_value.dtype}"
+                    )
+                # check ndim
+                if input_value.ndim != input_arg.jax_ndim:
+                    raise TypeError(
+                        f"Invalid dimensionality for vector argument '{input_arg.name}', expected {input_arg.jax_ndim} dimensions, got {input_value.ndim}"
+                    )
+                # check shape
+                if input_value.shape != input_arg.dtype_shape:
+                    raise TypeError(
+                        f"Invalid inner dimensions for vector argument '{input_arg.name}', expected {input_arg.shape}, got {input_value.shape}"
+                    )
             else:
                 # make sure scalar is not a traced variable, should be static
                 if isinstance(input_value, jax.core.Tracer):
@@ -383,6 +406,22 @@ class FfiCallable:
                         raise TypeError(
                             f"Invalid inner dimensions for array argument '{input_arg.name}', expected {input_arg.dtype_shape}, got {input_value.shape[-input_arg.dtype_ndim :]}"
                         )
+            elif input_arg.is_vector:
+                # check dtype
+                if input_value.dtype != input_arg.jax_scalar_type:
+                    raise TypeError(
+                        f"Invalid data type for vector argument '{input_arg.name}', expected {input_arg.jax_scalar_type}, got {input_value.dtype}"
+                    )
+                # check ndim
+                if input_value.ndim != input_arg.jax_ndim:
+                    raise TypeError(
+                        f"Invalid dimensionality for vector argument '{input_arg.name}', expected {input_arg.jax_ndim} dimensions, got {input_value.ndim}"
+                    )
+                # check shape
+                if input_value.shape != input_arg.dtype_shape:
+                    raise TypeError(
+                        f"Invalid inner dimensions for vector argument '{input_arg.name}', expected {input_arg.shape}, got {input_value.shape}"
+                    )
             else:
                 # make sure scalar is not a traced variable, should be static
                 if isinstance(input_value, jax.core.Tracer):
