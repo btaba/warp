@@ -29,9 +29,10 @@ from .xla_ffi import *
 
 
 class FfiArg:
-    def __init__(self, name, type):
+    def __init__(self, name, type, in_out):
         self.name = name
         self.type = type
+        self.in_out = in_out
         self.is_array = isinstance(type, wp.array)
 
         if self.is_array:
@@ -86,7 +87,7 @@ class FfiKernel:
         # process input args
         self.input_args = []
         for i in range(self.num_inputs):
-            arg = FfiArg(kernel.adj.args[i].label, kernel.adj.args[i].type)
+            arg = FfiArg(kernel.adj.args[i].label, kernel.adj.args[i].type, False)
             if arg.is_array:
                 # keep track of the first input array argument
                 if self.first_array_arg is None:
@@ -96,7 +97,7 @@ class FfiKernel:
         # process output args
         self.output_args = []
         for i in range(self.num_inputs, self.num_kernel_args):
-            arg = FfiArg(kernel.adj.args[i].label, kernel.adj.args[i].type)
+            arg = FfiArg(kernel.adj.args[i].label, kernel.adj.args[i].type, False)
             if not arg.is_array:
                 raise TypeError("All output arguments must be arrays")
             self.output_args.append(arg)
@@ -298,13 +299,14 @@ class FfiCallDesc:
 
 
 class FfiCallable:
-    def __init__(self, func, num_outputs, graph_compatible, vmap_method, output_dims):
+    def __init__(self, func, num_outputs, graph_compatible, vmap_method, output_dims, in_out_argnames):
         self.func = func
         self.name = generate_unique_name(func)
         self.num_outputs = num_outputs
         self.vmap_method = vmap_method
         self.graph_compatible = graph_compatible
         self.output_dims = output_dims
+        self.in_out_argnames = in_out_argnames
         self.first_array_arg = None
         self.has_static_args = False
         self.call_id = 0
@@ -314,7 +316,7 @@ class FfiCallable:
         argspec = get_full_arg_spec(func)
 
         num_args = len(argspec.args)
-        self.num_inputs = num_args - num_outputs
+        self.num_inputs = num_args - num_outputs + len(self.in_out_argnames)
         if self.num_outputs < 1:
             raise ValueError("At least one output is required")
         if self.num_outputs > num_args:
@@ -326,12 +328,14 @@ class FfiCallable:
         # parse type annotations
         self.args = []
         arg_idx = 0
+        in_out_argnames_ = set(self.in_out_argnames)
         for arg_name, arg_type in argspec.annotations.items():
             if arg_name == "return":
                 if arg_type is not None:
                     raise TypeError("Function must not return a value")
             else:
-                arg = FfiArg(arg_name, arg_type)
+                arg = FfiArg(arg_name, arg_type, arg_name in in_out_argnames_)
+                in_out_argnames_.remove(arg_name)
                 if arg.is_array:
                     if arg_idx < self.num_inputs and self.first_array_arg is None:
                         self.first_array_arg = arg_idx
@@ -340,8 +344,21 @@ class FfiCallable:
                 self.args.append(arg)
             arg_idx += 1
 
+        if in_out_argnames_:
+            raise ValueError(f"In/Out args: '{in_out_argnames_}' were not tracked by any input arguments.")
+
         self.input_args = self.args[: self.num_inputs]
-        self.output_args = self.args[self.num_inputs :]
+        self.output_args = [a for a in self.args if a.in_out] + self.args[self.num_inputs :]
+
+        # Build input output aliases.
+        out_id = 0
+        input_output_aliases = {}
+        for in_id, arg in enumerate(self.input_args):
+            if not arg.in_out:
+                continue
+            input_output_aliases[in_id] = out_id
+            out_id += 1
+        self.input_output_aliases = input_output_aliases
 
         # register the callback
         FFI_CCALLFUNC = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.POINTER(XLA_FFI_CallFrame))
@@ -416,6 +433,7 @@ class FfiCallable:
             self.name,
             out_types,
             vmap_method=vmap_method,
+            input_output_aliases=self.input_output_aliases,
             # has_side_effect=True,  # force this function to execute even if outputs aren't used
         )
 
@@ -490,7 +508,7 @@ class FfiCallable:
                     arg_list.append(value)
 
             # outputs
-            for i in range(num_outputs):
+            for i in range(len(self.input_output_aliases), num_outputs):
                 arg = self.output_args[i]
                 buffer = outputs[i].contents
                 shape = buffer.dims[: buffer.rank - arg.dtype_ndim]
@@ -520,7 +538,7 @@ _FFI_KERNEL_REGISTRY: dict[str, FfiKernel] = {}
 _FFI_REGISTRY_LOCK = threading.Lock()
 
 
-def jax_kernel(kernel, num_outputs=1, vmap_method="broadcast_all", launch_dims=None, output_dims=None):
+def jax_kernel(kernel, num_outputs=1, vmap_method="broadcast_all", launch_dims=None, output_dims=None, in_out_argnames=None):
     """Create a JAX callback from a Warp kernel.
 
     NOTE: This is an experimental feature under development.
@@ -536,6 +554,7 @@ def jax_kernel(kernel, num_outputs=1, vmap_method="broadcast_all", launch_dims=N
         output_dims: Optional. Specify the default dimensions of output arrays.  If None, output
                      dimensions are inferred from the launch dimensions.
                      This argument can also be specified for individual calls.
+        in_out_argnames: input arg names indicate which output arrays alias input arrays.
 
     Limitations:
         - All kernel arguments must be contiguous arrays or scalars.
@@ -554,7 +573,7 @@ def jax_kernel(kernel, num_outputs=1, vmap_method="broadcast_all", launch_dims=N
 
     with _FFI_REGISTRY_LOCK:
         if key not in _FFI_KERNEL_REGISTRY:
-            new_kernel = FfiKernel(kernel, num_outputs, vmap_method, launch_dims, output_dims)
+            new_kernel = FfiKernel(kernel, num_outputs, vmap_method, launch_dims, output_dims, in_out_argnames)
             _FFI_KERNEL_REGISTRY[key] = new_kernel
 
     return _FFI_KERNEL_REGISTRY[key]
@@ -566,6 +585,7 @@ def jax_callable(
     graph_compatible: bool = True,
     vmap_method: str = "broadcast_all",
     output_dims=None,
+    in_out_argnames=None,
 ):
     """Create a JAX callback from an annotated Python function.
 
@@ -582,6 +602,7 @@ def jax_callable(
         output_dims: Optional. Specify the default dimensions of output arrays.
             If ``None``, output dimensions are inferred from the launch dimensions.
             This argument can also be specified for individual calls.
+        in_out_argnames: input arg names indicate which output arrays alias input arrays.
 
     Limitations:
         - All kernel arguments must be contiguous arrays or scalars.
@@ -600,7 +621,7 @@ def jax_callable(
 
     with _FFI_REGISTRY_LOCK:
         if key not in _FFI_CALLABLE_REGISTRY:
-            new_callable = FfiCallable(func, num_outputs, graph_compatible, vmap_method, output_dims)
+            new_callable = FfiCallable(func, num_outputs, graph_compatible, vmap_method, output_dims, in_out_argnames)
             _FFI_CALLABLE_REGISTRY[key] = new_callable
 
     return _FFI_CALLABLE_REGISTRY[key]
