@@ -306,7 +306,7 @@ class FfiCallable:
         self.vmap_method = vmap_method
         self.graph_compatible = graph_compatible
         self.output_dims = output_dims
-        self.in_out_argnames = in_out_argnames
+        self.in_out_argnames = in_out_argnames or []
         self.first_array_arg = None
         self.has_static_args = False
         self.call_id = 0
@@ -335,7 +335,8 @@ class FfiCallable:
                     raise TypeError("Function must not return a value")
             else:
                 arg = FfiArg(arg_name, arg_type, arg_name in in_out_argnames_)
-                in_out_argnames_.remove(arg_name)
+                if arg_name in in_out_argnames_:
+                    in_out_argnames_.remove(arg_name)
                 if arg.is_array:
                     if arg_idx < self.num_inputs and self.first_array_arg is None:
                         self.first_array_arg = arg_idx
