@@ -16,7 +16,7 @@
 import ctypes
 import threading
 import traceback
-from typing import Callable
+from typing import Callable, Optional
 
 import jax
 
@@ -29,7 +29,7 @@ from .xla_ffi import *
 
 
 class FfiArg:
-    def __init__(self, name, type, in_out):
+    def __init__(self, name, type, in_out=False):
         self.name = name
         self.type = type
         self.in_out = in_out
@@ -584,7 +584,7 @@ def jax_callable(
     func: Callable,
     num_outputs: int = 1,
     graph_compatible: bool = True,
-    vmap_method: str = "broadcast_all",
+    vmap_method: Optional[str] = "broadcast_all",
     output_dims=None,
     in_out_argnames=None,
 ):
