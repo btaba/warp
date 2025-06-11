@@ -343,10 +343,20 @@ class FfiCallable:
                 else:
                     self.has_static_args = True
                 self.args.append(arg)
+
+            error_str = ("in_out arguments should form a contiguous block of arguments"
+                         "after input-only arguments and before output-only arguments.")
+            if arg_idx < (num_args - num_outputs) and arg.in_out:
+                raise ValueError(f"Expected input-only argument at position {arg_idx} for argument {arg_name}. {error_str}")
+            elif (num_args - num_outputs) <= arg_idx < self.num_inputs and not arg.in_out:
+                raise ValueError(f"Expected in_out argument at position {arg_idx} for argument {arg_name}. {error_str}")
+            elif arg_idx >= self.num_inputs and arg.in_out:
+                raise ValueError(f"Expected an output-only argument at position {arg_idx} for argument {arg_name}. {error_str}")
+
             arg_idx += 1
 
         if in_out_argnames_:
-            raise ValueError(f"In/Out args: '{in_out_argnames_}' were not tracked by any input arguments.")
+            raise ValueError(f"in_out_argnames: '{in_out_argnames_}' did not match any function argument names.")
 
         self.input_args = self.args[: self.num_inputs]
         self.output_args = [a for a in self.args if a.in_out] + self.args[self.num_inputs :]
