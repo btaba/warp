@@ -30,8 +30,6 @@ from warp._src.types import array_t, launch_bounds_t, strides_from_shape, type_t
 
 from .xla_ffi import *
 
-_wp_module_name_ = "warp.jax_experimental.ffi"
-
 # Type alias for differentiable kernel cache key
 DiffKernelCacheKey = tuple[Callable, tuple, int, str, tuple[str, ...]]
 
@@ -62,6 +60,7 @@ class GraphMode(IntEnum):
     NONE = 0  # don't capture a graph
     JAX = 1  # let JAX capture a graph
     WARP = 2  # let Warp capture a graph
+    WARP_STAGED = 3  # let Warp capture the graph with staging buffers
 
 
 class ModulePreloadMode(IntEnum):
@@ -390,6 +389,7 @@ class FfiKernel:
 class FfiCallDesc:
     def __init__(self, static_inputs):
         self.static_inputs = static_inputs
+        self.capture = None
 
 
 class FfiCallable:
@@ -666,6 +666,53 @@ class FfiCallable:
                         # early out
                         return
 
+                elif self.graph_mode == GraphMode.WARP_STAGED:
+                    if call_desc.capture is not None:
+                        device_ordinal = get_device_ordinal_from_callframe(call_frame.contents)
+                        device = wp.get_cuda_device(device_ordinal)
+                        stream = wp.Stream(device, cuda_stream=cuda_stream)
+
+                        # convert all given arrays to Warp arrays
+                        callback_arrays = []
+                        # input and in-out args
+                        for i, arg in enumerate(self.input_args):
+                            if arg.is_array:
+                                buffer = inputs[i].contents
+                                shape = buffer.dims[: buffer.rank - arg.dtype_ndim]
+                                arr = wp.array(ptr=buffer.data, dtype=arg.type.dtype, shape=shape, device=device)
+                                callback_arrays.append(arr)
+                        # pure output args (skip in-out FFI buffers)
+                        for i, arg in enumerate(self.output_args):
+                            buffer = outputs[i + self.num_in_out].contents
+                            shape = buffer.dims[: buffer.rank - arg.dtype_ndim]
+                            arr = wp.array(ptr=buffer.data, dtype=arg.type.dtype, shape=shape, device=device)
+                            callback_arrays.append(arr)
+
+                        # copy inputs to staging buffers (including in-out arrays)
+                        for i in call_desc.staged_input_range:
+                            wp.copy(call_desc.staging_arrays[i], callback_arrays[i], stream=stream)
+
+                        # NOTE: We use the native graph API to avoid overhead with obtaining Stream and Device objects in Python.
+                        # This code should match wp.capture_launch().
+                        graph = call_desc.capture.graph
+                        if graph.graph_exec is None:
+                            g = ctypes.c_void_p()
+                            if not wp._src.context.runtime.core.wp_cuda_graph_create_exec(
+                                graph.device.context, cuda_stream, graph.graph, ctypes.byref(g)
+                            ):
+                                raise RuntimeError(f"Graph creation error: {wp.context.runtime.get_error_string()}")
+                            graph.graph_exec = g
+
+                        if not wp._src.context.runtime.core.wp_cuda_graph_launch(graph.graph_exec, cuda_stream):
+                            raise RuntimeError(f"Graph launch error: {wp.context.runtime.get_error_string()}")
+
+                        # copy outputs from staging buffers (including in-out arrays)
+                        for i in call_desc.staged_output_range:
+                            wp.copy(callback_arrays[i], call_desc.staging_arrays[i], stream=stream)
+
+                        # early out
+                        return
+
                 device_ordinal = get_device_ordinal_from_callframe(call_frame.contents)
                 device = wp.get_cuda_device(device_ordinal)
                 stream = wp.Stream(device, cuda_stream=cuda_stream)
@@ -693,7 +740,7 @@ class FfiCallable:
                     arg_list.append(arr)
 
                 # call the Python function with reconstructed arguments
-                with wp.ScopedStream(stream, sync_enter=False):
+                with wp.ScopedStream(stream, sync_enter=True):
                     if stream.is_capturing:
                         # capturing with JAX
                         with wp.ScopedCapture(external=True) as capture:
@@ -710,6 +757,42 @@ class FfiCallable:
                         # respect the cache size limit if specified
                         if self._graph_cache_max is not None and len(self.captures) > self._graph_cache_max:
                             self.captures.popitem(last=False)
+
+                    elif self.graph_mode == GraphMode.WARP_STAGED:
+                        # capturing with WARP using staging buffers
+                        callback_arrays = []
+                        staging_arrays = []
+                        for i, arg in enumerate(arg_list):
+                            if i == self.num_inputs:
+                                # subrange of staging arrays that are inputs (includes in-out args)
+                                staged_input_range = range(len(staging_arrays))
+                            if isinstance(arg, wp.array):
+                                callback_arrays.append(arg_list[i])
+                                staging_arr = wp.empty_like(arg)
+                                staging_arrays.append(staging_arr)
+                                arg_list[i] = staging_arr
+
+                        # subrange of staging buffers that are outputs (includes in-out args)
+                        staged_output_range = range(staged_input_range.stop - self.num_in_out, len(staging_arrays))
+
+                        # copy inputs to staging buffers (including in-out arrays)
+                        for i in staged_input_range:
+                            wp.copy(staging_arrays[i], callback_arrays[i], stream=stream)
+
+                        # capture using staging arrays
+                        with wp.ScopedCapture() as capture:
+                            self.func(*arg_list)
+                        wp.capture_launch(capture.graph)
+
+                        # copy outputs from staging buffers (including in-out arrays)
+                        for i in staged_output_range:
+                            wp.copy(callback_arrays[i], staging_arrays[i], stream=stream)
+
+                        call_desc.capture = capture
+                        call_desc.staging_arrays = staging_arrays
+                        call_desc.staged_input_range = staged_input_range
+                        call_desc.staged_output_range = staged_output_range
+
                     else:
                         # not capturing
                         self.func(*arg_list)
