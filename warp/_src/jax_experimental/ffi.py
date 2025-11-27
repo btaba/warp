@@ -26,9 +26,14 @@ import jax
 import warp as wp
 from warp._src.codegen import get_full_arg_spec, make_full_qualified_name
 from warp._src.jax import get_jax_device
-from warp._src.types import array_t, launch_bounds_t, strides_from_shape, type_to_warp
+from warp._src.types import array_t, launch_bounds_t, strides_from_shape, type_to_warp, type_size_in_bytes
 
 from .xla_ffi import *
+
+# !!!
+import nvtx
+import time
+
 
 # Type alias for differentiable kernel cache key
 DiffKernelCacheKey = tuple[Callable, tuple, int, str, tuple[str, ...]]
@@ -61,6 +66,11 @@ class GraphMode(IntEnum):
     JAX = 1  # let JAX capture a graph
     WARP = 2  # let Warp capture a graph
     WARP_STAGED = 3  # let Warp capture the graph with staging buffers
+    WARP_STAGED_V1 = 3
+    WARP_STAGED_V2 = 4
+    WARP_STAGED_V2B = 5
+    WARP_STAGED_V3 = 6
+    WARP_STAGED_V3B = 7
 
 
 class ModulePreloadMode(IntEnum):
@@ -638,80 +648,290 @@ class FfiCallable:
                 cuda_stream = get_stream_from_callframe(call_frame.contents)
 
                 if self.graph_mode == GraphMode.WARP:
-                    # check if we already captured an identical call
-                    ip = [inputs[i].contents.data for i in self.array_input_indices]
-                    op = [outputs[i].contents.data for i in self.array_output_indices]
-                    capture_key = hash((call_id, *ip, *op))
-                    capture = self.captures.get(capture_key)
+                    with nvtx.annotate("GraphMode.WARP"):
+                        # check if we already captured an identical call
+                        with nvtx.annotate("lookup"):
+                            ip = [inputs[i].contents.data for i in self.array_input_indices]
+                            op = [outputs[i].contents.data for i in self.array_output_indices]
+                            capture_key = hash((call_id, *ip, *op))
+                            capture = self.captures.get(capture_key)
 
-                    # launch existing graph
-                    if capture is not None:
-                        # NOTE: We use the native graph API to avoid overhead with obtaining Stream and Device objects in Python.
-                        # This code should match wp.capture_launch().
-                        graph = capture.graph
-                        if graph.graph_exec is None:
-                            g = ctypes.c_void_p()
-                            if not wp._src.context.runtime.core.wp_cuda_graph_create_exec(
-                                graph.device.context, cuda_stream, graph.graph, ctypes.byref(g)
-                            ):
-                                raise RuntimeError(f"Graph creation error: {wp.context.runtime.get_error_string()}")
-                            graph.graph_exec = g
+                        # launch existing graph
+                        if capture is not None:
+                            # NOTE: We use the native graph API to avoid overhead with obtaining Stream and Device objects in Python.
+                            # This code should match wp.capture_launch().
+                            with nvtx.annotate("graph"):
+                                graph = capture.graph
+                                if graph.graph_exec is None:
+                                    g = ctypes.c_void_p()
+                                    if not wp._src.context.runtime.core.wp_cuda_graph_create_exec(
+                                        graph.device.context, cuda_stream, graph.graph, ctypes.byref(g)
+                                    ):
+                                        raise RuntimeError(f"Graph creation error: {wp.context.runtime.get_error_string()}")
+                                    graph.graph_exec = g
 
-                        if not wp._src.context.runtime.core.wp_cuda_graph_launch(graph.graph_exec, cuda_stream):
-                            raise RuntimeError(f"Graph launch error: {wp.context.runtime.get_error_string()}")
+                                if not wp._src.context.runtime.core.wp_cuda_graph_launch(graph.graph_exec, cuda_stream):
+                                    raise RuntimeError(f"Graph launch error: {wp.context.runtime.get_error_string()}")
 
-                        # update the graph cache to keep recently used graphs alive
-                        self.captures.move_to_end(capture_key)
+                            with nvtx.annotate("move_to_end"):
+                                # update the graph cache to keep recently used graphs alive
+                                self.captures.move_to_end(capture_key)
 
-                        # early out
-                        return
+                            # early out
+                            return
 
                 elif self.graph_mode == GraphMode.WARP_STAGED:
-                    if call_desc.capture is not None:
-                        device_ordinal = get_device_ordinal_from_callframe(call_frame.contents)
-                        device = wp.get_cuda_device(device_ordinal)
-                        stream = wp.Stream(device, cuda_stream=cuda_stream)
+                    with nvtx.annotate("staged"):
+                        if call_desc.capture is not None:
+                            with nvtx.annotate("things"):
+                                device_ordinal = get_device_ordinal_from_callframe(call_frame.contents)
+                                device = wp.get_cuda_device(device_ordinal)
+                                stream = wp.Stream(device, cuda_stream=cuda_stream)
 
-                        # convert all given arrays to Warp arrays
-                        callback_arrays = []
-                        # input and in-out args
-                        for i, arg in enumerate(self.input_args):
-                            if arg.is_array:
-                                buffer = inputs[i].contents
-                                shape = buffer.dims[: buffer.rank - arg.dtype_ndim]
-                                arr = wp.array(ptr=buffer.data, dtype=arg.type.dtype, shape=shape, device=device)
-                                callback_arrays.append(arr)
-                        # pure output args (skip in-out FFI buffers)
-                        for i, arg in enumerate(self.output_args):
-                            buffer = outputs[i + self.num_in_out].contents
-                            shape = buffer.dims[: buffer.rank - arg.dtype_ndim]
-                            arr = wp.array(ptr=buffer.data, dtype=arg.type.dtype, shape=shape, device=device)
-                            callback_arrays.append(arr)
+                            with nvtx.annotate("arrays"):
+                                # convert all given arrays to Warp arrays
+                                callback_arrays = []
+                                # input and in-out args
+                                for i, arg in enumerate(self.input_args):
+                                    if arg.is_array:
+                                        buffer = inputs[i].contents
+                                        shape = buffer.dims[: buffer.rank - arg.dtype_ndim]
+                                        arr = wp.array(ptr=buffer.data, dtype=arg.type.dtype, shape=shape, device=device)
+                                        callback_arrays.append(arr)
+                                # pure output args (skip in-out FFI buffers)
+                                for i, arg in enumerate(self.output_args):
+                                    buffer = outputs[i + self.num_in_out].contents
+                                    shape = buffer.dims[: buffer.rank - arg.dtype_ndim]
+                                    arr = wp.array(ptr=buffer.data, dtype=arg.type.dtype, shape=shape, device=device)
+                                    callback_arrays.append(arr)
 
-                        # copy inputs to staging buffers (including in-out arrays)
-                        for i in call_desc.staged_input_range:
-                            wp.copy(call_desc.staging_arrays[i], callback_arrays[i], stream=stream)
+                            with nvtx.annotate("inputs"):
+                                # copy inputs to staging buffers (including in-out arrays)
+                                for i in call_desc.staged_input_range:
+                                    wp.copy(call_desc.staging_arrays[i], callback_arrays[i], stream=stream)
 
-                        # NOTE: We use the native graph API to avoid overhead with obtaining Stream and Device objects in Python.
-                        # This code should match wp.capture_launch().
-                        graph = call_desc.capture.graph
-                        if graph.graph_exec is None:
-                            g = ctypes.c_void_p()
-                            if not wp._src.context.runtime.core.wp_cuda_graph_create_exec(
-                                graph.device.context, cuda_stream, graph.graph, ctypes.byref(g)
-                            ):
-                                raise RuntimeError(f"Graph creation error: {wp.context.runtime.get_error_string()}")
-                            graph.graph_exec = g
+                            # NOTE: We use the native graph API to avoid overhead with obtaining Stream and Device objects in Python.
+                            # This code should match wp.capture_launch().
+                            with nvtx.annotate("graph"):
+                                graph = call_desc.capture.graph
+                                if graph.graph_exec is None:
+                                    g = ctypes.c_void_p()
+                                    if not wp._src.context.runtime.core.wp_cuda_graph_create_exec(
+                                        graph.device.context, cuda_stream, graph.graph, ctypes.byref(g)
+                                    ):
+                                        raise RuntimeError(f"Graph creation error: {wp.context.runtime.get_error_string()}")
+                                    graph.graph_exec = g
 
-                        if not wp._src.context.runtime.core.wp_cuda_graph_launch(graph.graph_exec, cuda_stream):
-                            raise RuntimeError(f"Graph launch error: {wp.context.runtime.get_error_string()}")
+                                if not wp._src.context.runtime.core.wp_cuda_graph_launch(graph.graph_exec, cuda_stream):
+                                    raise RuntimeError(f"Graph launch error: {wp.context.runtime.get_error_string()}")
 
-                        # copy outputs from staging buffers (including in-out arrays)
-                        for i in call_desc.staged_output_range:
-                            wp.copy(callback_arrays[i], call_desc.staging_arrays[i], stream=stream)
+                            # copy outputs from staging buffers (including in-out arrays)
+                            with nvtx.annotate("outputs"):
+                                for i in call_desc.staged_output_range:
+                                    wp.copy(callback_arrays[i], call_desc.staging_arrays[i], stream=stream)
 
-                        # early out
-                        return
+                            # early out
+                            return
+
+                elif self.graph_mode == GraphMode.WARP_STAGED_V2:
+                    with nvtx.annotate("staged2"):
+                        if call_desc.capture is not None:
+                            memcpy_d2d = wp._src.context.runtime.core.wp_memcpy_d2d
+
+                            with nvtx.annotate("things"):
+                                device_ordinal = get_device_ordinal_from_callframe(call_frame.contents)
+                                device = wp.get_cuda_device(device_ordinal)
+
+                            with nvtx.annotate("buffers"):
+                                # get callback buffer pointers
+                                callback_buffers = []
+                                # input and in-out args
+                                for i, arg in enumerate(self.input_args):
+                                    if arg.is_array:
+                                        callback_buffers.append(inputs[i].contents.data)
+                                # pure output args (skip in-out FFI buffers)
+                                for i, arg in enumerate(self.output_args):
+                                    callback_buffers.append(outputs[i + self.num_in_out].contents.data)
+
+                            with nvtx.annotate("inputs"):
+                                # copy inputs to staging buffers (including in-out arrays)
+                                for i in call_desc.staged_input_range:
+                                    memcpy_d2d(
+                                        device.context,
+                                        call_desc.staging_arrays[i].ptr,
+                                        callback_buffers[i],
+                                        call_desc.staging_sizes[i],
+                                        cuda_stream,
+                                    )
+
+                            graph = call_desc.capture.graph
+                            assert graph.graph_exec
+
+                            # NOTE: We use the native graph API to avoid overhead with obtaining Stream and Device objects in Python.
+                            # This code should match wp.capture_launch().
+                            with nvtx.annotate("graph"):
+                                if not wp._src.context.runtime.core.wp_cuda_graph_launch(graph.graph_exec, cuda_stream):
+                                    raise RuntimeError(f"Graph launch error: {wp.context.runtime.get_error_string()}")
+
+                            # copy outputs from staging buffers (including in-out arrays)
+                            with nvtx.annotate("outputs"):
+                                for i in call_desc.staged_output_range:
+                                    memcpy_d2d(
+                                        device.context,
+                                        callback_buffers[i],
+                                        call_desc.staging_arrays[i].ptr,
+                                        call_desc.staging_sizes[i],
+                                        cuda_stream,
+                                    )
+
+                            # early out
+                            return
+
+                elif self.graph_mode == GraphMode.WARP_STAGED_V2B:
+                    with nvtx.annotate("staged2b"):
+                        if call_desc.capture is not None:
+                            memcpy_batch = wp._src.context.runtime.core.wp_memcpy_batch
+
+                            graph_exec = call_desc.capture.graph.graph_exec
+
+                            device_ordinal = get_device_ordinal_from_callframe(call_frame.contents)
+                            device = wp.get_cuda_device(device_ordinal)
+
+                            with nvtx.annotate("inputs"):
+                                # set source pointers for input memcpy nodes
+                                memcpy_idx = 0
+                                for input_idx in call_desc.memcpy_input_indices:
+                                    call_desc.input_memcpy_srcs[memcpy_idx] = inputs[input_idx].contents.data
+                                    memcpy_idx += 1
+                                # # set destination pointers for output memcpy nodes
+                                # for output_idx in call_desc.memcpy_output_indices:
+                                #     call_desc.memcpy_dsts[memcpy_idx] = outputs[output_idx].contents.data
+                                #     memcpy_idx += 1
+
+                                memcpy_batch(
+                                    device.context,
+                                    call_desc.input_memcpy_dsts,
+                                    call_desc.input_memcpy_srcs,
+                                    call_desc.input_memcpy_sizes,
+                                    len(call_desc.input_memcpy_dsts),
+                                    cuda_stream,
+                                )
+
+                            # NOTE: We use the native graph API to avoid overhead with obtaining Stream and Device objects in Python.
+                            # This code should match wp.capture_launch().
+                            with nvtx.annotate("graph"):
+                                if not wp._src.context.runtime.core.wp_cuda_graph_launch(graph_exec, cuda_stream):
+                                    raise RuntimeError(f"Graph launch error: {wp.context.runtime.get_error_string()}")
+
+                            with nvtx.annotate("outputs"):
+                                # set destination pointers for output memcpy nodes
+                                memcpy_idx = 0
+                                for output_idx in call_desc.memcpy_output_indices:
+                                    call_desc.output_memcpy_dsts[memcpy_idx] = outputs[output_idx].contents.data
+                                    memcpy_idx += 1
+
+                                memcpy_batch(
+                                    device.context,
+                                    call_desc.output_memcpy_dsts,
+                                    call_desc.output_memcpy_srcs,
+                                    call_desc.output_memcpy_sizes,
+                                    len(call_desc.output_memcpy_dsts),
+                                    cuda_stream,
+                                )
+
+                            # early out
+                            return
+
+                elif self.graph_mode == GraphMode.WARP_STAGED_V3:
+                    with nvtx.annotate("staged3"):
+                        if call_desc.capture is not None:
+                            with nvtx.annotate("buffers"):
+                                # get callback buffer pointers
+                                callback_buffers = []
+                                # input and in-out args
+                                for i, arg in enumerate(self.input_args):
+                                    if arg.is_array:
+                                        callback_buffers.append(inputs[i].contents.data)
+                                # pure output args (skip in-out FFI buffers)
+                                for i, arg in enumerate(self.output_args):
+                                    callback_buffers.append(outputs[i + self.num_in_out].contents.data)
+
+                            update_memcpy = wp._src.context.runtime.core.wp_cuda_graph_update_memcpy
+
+                            graph = call_desc.capture.graph
+                            assert graph.graph_exec
+
+                            with nvtx.annotate("nodes"):
+                                input_node_iter = iter(call_desc.staging_input_nodes)
+                                for i in call_desc.staged_input_range:
+                                    update_memcpy(
+                                        graph.graph_exec,
+                                        next(input_node_iter),
+                                        call_desc.staging_arrays[i].ptr,
+                                        callback_buffers[i],
+                                        call_desc.staging_sizes[i],
+                                        # FIXME:
+                                        0,
+                                    )
+
+                                output_node_iter = iter(call_desc.staging_output_nodes)
+                                for i in call_desc.staged_output_range:
+                                    update_memcpy(
+                                        graph.graph_exec,
+                                        next(output_node_iter),
+                                        callback_buffers[i],
+                                        call_desc.staging_arrays[i].ptr,
+                                        call_desc.staging_sizes[i],
+                                        # FIXME:
+                                        0,
+                                    )
+
+                            # NOTE: We use the native graph API to avoid overhead with obtaining Stream and Device objects in Python.
+                            # This code should match wp.capture_launch().
+                            with nvtx.annotate("graph"):
+                                if not wp._src.context.runtime.core.wp_cuda_graph_launch(graph.graph_exec, cuda_stream):
+                                    raise RuntimeError(f"Graph launch error: {wp.context.runtime.get_error_string()}")
+
+                            # early out
+                            return
+
+                elif self.graph_mode == GraphMode.WARP_STAGED_V3B:
+                    with nvtx.annotate("staged3b"):
+                        if call_desc.capture is not None:
+                            update_memcpy_batch = wp._src.context.runtime.core.wp_cuda_graph_update_memcpy_batch
+
+                            graph_exec = call_desc.capture.graph.graph_exec
+
+                            with nvtx.annotate("nodes"):
+                                # set source pointers for input memcpy nodes
+                                memcpy_idx = 0
+                                for input_idx in call_desc.memcpy_input_indices:
+                                    call_desc.memcpy_srcs[memcpy_idx] = inputs[input_idx].contents.data
+                                    memcpy_idx += 1
+                                # set destination pointers for output memcpy nodes
+                                for output_idx in call_desc.memcpy_output_indices:
+                                    call_desc.memcpy_dsts[memcpy_idx] = outputs[output_idx].contents.data
+                                    memcpy_idx += 1
+
+                                # update all memcpy nodes together
+                                update_memcpy_batch(
+                                    graph_exec,
+                                    call_desc.memcpy_nodes,
+                                    call_desc.memcpy_dsts,
+                                    call_desc.memcpy_srcs,
+                                    call_desc.memcpy_sizes,
+                                    None,
+                                    len(call_desc.memcpy_nodes),
+                                )
+
+                            # NOTE: We use the native graph API to avoid overhead with obtaining Stream and Device objects in Python.
+                            # This code should match wp.capture_launch().
+                            with nvtx.annotate("graph"):
+                                if not wp._src.context.runtime.core.wp_cuda_graph_launch(graph_exec, cuda_stream):
+                                    raise RuntimeError(f"Graph launch error: {wp.context.runtime.get_error_string()}")
+
+                            # early out
+                            return
 
                 device_ordinal = get_device_ordinal_from_callframe(call_frame.contents)
                 device = wp.get_cuda_device(device_ordinal)
@@ -759,39 +979,304 @@ class FfiCallable:
                             self.captures.popitem(last=False)
 
                     elif self.graph_mode == GraphMode.WARP_STAGED:
-                        # capturing with WARP using staging buffers
-                        callback_arrays = []
-                        staging_arrays = []
-                        for i, arg in enumerate(arg_list):
-                            if i == self.num_inputs:
-                                # subrange of staging arrays that are inputs (includes in-out args)
-                                staged_input_range = range(len(staging_arrays))
-                            if isinstance(arg, wp.array):
-                                callback_arrays.append(arg_list[i])
-                                staging_arr = wp.empty_like(arg)
-                                staging_arrays.append(staging_arr)
-                                arg_list[i] = staging_arr
+                        with nvtx.annotate("staged setup"):
+                            # capturing with WARP using staging buffers
+                            callback_arrays = []
+                            staging_arrays = []
+                            for i, arg in enumerate(arg_list):
+                                if i == self.num_inputs:
+                                    # subrange of staging arrays that are inputs (includes in-out args)
+                                    staged_input_range = range(len(staging_arrays))
+                                if isinstance(arg, wp.array):
+                                    callback_arrays.append(arg_list[i])
+                                    staging_arr = wp.empty_like(arg)
+                                    staging_arrays.append(staging_arr)
+                                    arg_list[i] = staging_arr
 
-                        # subrange of staging buffers that are outputs (includes in-out args)
-                        staged_output_range = range(staged_input_range.stop - self.num_in_out, len(staging_arrays))
+                            # subrange of staging buffers that are outputs (includes in-out args)
+                            staged_output_range = range(staged_input_range.stop - self.num_in_out, len(staging_arrays))
 
-                        # copy inputs to staging buffers (including in-out arrays)
-                        for i in staged_input_range:
-                            wp.copy(staging_arrays[i], callback_arrays[i], stream=stream)
+                            # copy inputs to staging buffers (including in-out arrays)
+                            for i in staged_input_range:
+                                wp.copy(staging_arrays[i], callback_arrays[i], stream=stream)
 
-                        # capture using staging arrays
-                        with wp.ScopedCapture() as capture:
-                            self.func(*arg_list)
-                        wp.capture_launch(capture.graph)
+                            # capture using staging arrays
+                            with wp.ScopedCapture() as capture:
+                                self.func(*arg_list)
+                            wp.capture_launch(capture.graph)
 
-                        # copy outputs from staging buffers (including in-out arrays)
-                        for i in staged_output_range:
-                            wp.copy(callback_arrays[i], staging_arrays[i], stream=stream)
+                            # copy outputs from staging buffers (including in-out arrays)
+                            for i in staged_output_range:
+                                wp.copy(callback_arrays[i], staging_arrays[i], stream=stream)
 
-                        call_desc.capture = capture
-                        call_desc.staging_arrays = staging_arrays
-                        call_desc.staged_input_range = staged_input_range
-                        call_desc.staged_output_range = staged_output_range
+                            call_desc.capture = capture
+                            call_desc.staging_arrays = staging_arrays
+                            call_desc.staged_input_range = staged_input_range
+                            call_desc.staged_output_range = staged_output_range
+
+                    elif self.graph_mode == GraphMode.WARP_STAGED_V2:
+                        with nvtx.annotate("staged2 setup"):
+                            # capturing with WARP using staging buffers
+                            callback_arrays = []
+                            staging_arrays = []
+                            staging_sizes = []
+                            for i, arg in enumerate(arg_list):
+                                if i == self.num_inputs:
+                                    # subrange of staging arrays that are inputs (includes in-out args)
+                                    staged_input_range = range(len(staging_arrays))
+                                if isinstance(arg, wp.array):
+                                    callback_arrays.append(arg_list[i])
+                                    staging_arr = wp.empty_like(arg)
+                                    staging_arrays.append(staging_arr)
+                                    staging_sizes.append(staging_arr.size * type_size_in_bytes(staging_arr.dtype))
+                                    arg_list[i] = staging_arr
+
+                            # subrange of staging buffers that are outputs (includes in-out args)
+                            staged_output_range = range(staged_input_range.stop - self.num_in_out, len(staging_arrays))
+
+                            # copy inputs to staging buffers (including in-out arrays)
+                            for i in staged_input_range:
+                                wp.copy(staging_arrays[i], callback_arrays[i], stream=stream)
+
+                            # capture using staging arrays
+                            with wp.ScopedCapture() as capture:
+                                self.func(*arg_list)
+                            wp.capture_launch(capture.graph)
+
+                            # copy outputs from staging buffers (including in-out arrays)
+                            for i in staged_output_range:
+                                wp.copy(callback_arrays[i], staging_arrays[i], stream=stream)
+
+                            call_desc.capture = capture
+                            call_desc.staging_arrays = staging_arrays
+                            call_desc.staging_sizes = staging_sizes
+                            call_desc.staged_input_range = staged_input_range
+                            call_desc.staged_output_range = staged_output_range
+
+                    elif self.graph_mode == GraphMode.WARP_STAGED_V3:
+                        insert_memcpy = wp._src.context.runtime.core.wp_cuda_graph_insert_memcpy
+
+                        with nvtx.annotate("staged3 setup"):
+                            # capturing with WARP using staging buffers
+                            callback_arrays = []
+                            staging_arrays = []
+                            staging_sizes = []
+                            staging_input_nodes = []
+                            staging_output_nodes = []
+                            for i, arg in enumerate(arg_list):
+                                if i == self.num_inputs:
+                                    # subrange of staging arrays that are inputs (includes in-out args)
+                                    staged_input_range = range(len(staging_arrays))
+                                if isinstance(arg, wp.array):
+                                    callback_arrays.append(arg_list[i])
+                                    staging_arr = wp.empty_like(arg)
+                                    staging_arrays.append(staging_arr)
+                                    staging_sizes.append(staging_arr.size * type_size_in_bytes(staging_arr.dtype))
+                                    arg_list[i] = staging_arr
+
+                            # subrange of staging buffers that are outputs (includes in-out args)
+                            staged_output_range = range(staged_input_range.stop - self.num_in_out, len(staging_arrays))
+
+                            # capture using staging arrays
+                            with wp.ScopedCapture() as capture:
+                                for i in staged_input_range:
+                                    node = insert_memcpy(
+                                        device.context,
+                                        cuda_stream,
+                                        staging_arrays[i].ptr,
+                                        callback_arrays[i].ptr,
+                                        staging_sizes[i],
+                                        # !!! FIXME
+                                        0,
+                                    )
+                                    staging_input_nodes.append(node)
+
+                                self.func(*arg_list)
+
+                                for i in staged_output_range:
+                                    node = insert_memcpy(
+                                        device.context,
+                                        cuda_stream,
+                                        callback_arrays[i].ptr,
+                                        staging_arrays[i].ptr,
+                                        staging_sizes[i],
+                                        # !!! FIXME
+                                        0,
+                                    )
+                                    staging_output_nodes.append(node)
+
+                            wp.capture_launch(capture.graph)
+
+                            call_desc.capture = capture
+                            call_desc.staging_arrays = staging_arrays
+                            call_desc.staging_sizes = staging_sizes
+                            call_desc.staging_input_nodes = staging_input_nodes
+                            call_desc.staging_output_nodes = staging_output_nodes
+                            call_desc.staged_input_range = staged_input_range
+                            call_desc.staged_output_range = staged_output_range
+
+                    elif self.graph_mode == GraphMode.WARP_STAGED_V2B:
+                        memcpy_d2d = wp._src.context.runtime.core.wp_memcpy_d2d
+
+                        with nvtx.annotate("staged2b setup"):
+                            # capturing with WARP using staging buffers
+                            callback_arrays = []
+                            staging_arrays = []
+                            for i, arg in enumerate(arg_list):
+                                if i == self.num_inputs:
+                                    # subrange of staging arrays that are inputs (includes in-out args)
+                                    staged_input_range = range(len(staging_arrays))
+                                if isinstance(arg, wp.array):
+                                    callback_arrays.append(arg_list[i])
+                                    staging_arr = wp.empty_like(arg)
+                                    staging_arrays.append(staging_arr)
+                                    arg_list[i] = staging_arr
+
+                            # subrange of staging buffers that are outputs (includes in-out args)
+                            staged_output_range = range(staged_input_range.stop - self.num_in_out, len(staging_arrays))
+
+                            input_memcpy_srcs = []
+                            input_memcpy_dsts = []
+                            input_memcpy_sizes = []
+                            for i in staged_input_range:
+                                size = staging_arrays[i].size * type_size_in_bytes(staging_arrays[i].dtype)
+                                input_memcpy_srcs.append(callback_arrays[i].ptr)
+                                input_memcpy_dsts.append(staging_arrays[i].ptr)
+                                input_memcpy_sizes.append(size)
+
+                            output_memcpy_srcs = []
+                            output_memcpy_dsts = []
+                            output_memcpy_sizes = []
+                            for i in staged_output_range:
+                                size = staging_arrays[i].size * type_size_in_bytes(staging_arrays[i].dtype)
+                                output_memcpy_srcs.append(staging_arrays[i].ptr)
+                                output_memcpy_dsts.append(callback_arrays[i].ptr)
+                                output_memcpy_sizes.append(size)
+
+                            # copy inputs to staging buffers (including in-out arrays)
+                            for i in staged_input_range:
+                                wp.copy(staging_arrays[i], callback_arrays[i], stream=stream)
+
+                            # capture using staging arrays
+                            with wp.ScopedCapture() as capture:
+                                self.func(*arg_list)
+                            wp.capture_launch(capture.graph)
+
+                            # copy outputs from staging buffers (including in-out arrays)
+                            for i in staged_output_range:
+                                wp.copy(callback_arrays[i], staging_arrays[i], stream=stream)
+
+                            call_desc.memcpy_input_indices = []
+                            for i, arg in enumerate(self.input_args):
+                                if arg.is_array:
+                                    call_desc.memcpy_input_indices.append(i)
+                            call_desc.memcpy_output_indices = list(range(num_outputs))
+
+                            num_input_copies = len(input_memcpy_srcs)
+                            call_desc.input_memcpy_srcs = (ctypes.c_void_p * num_input_copies)()
+                            call_desc.input_memcpy_dsts = (ctypes.c_void_p * num_input_copies)()
+                            call_desc.input_memcpy_sizes = (ctypes.c_size_t * num_input_copies)()
+                            for i in range(num_input_copies):
+                                call_desc.input_memcpy_srcs[i] = input_memcpy_srcs[i]
+                                call_desc.input_memcpy_dsts[i] = input_memcpy_dsts[i]
+                                call_desc.input_memcpy_sizes[i] = input_memcpy_sizes[i]
+
+                            num_output_copies = len(output_memcpy_srcs)
+                            call_desc.output_memcpy_srcs = (ctypes.c_void_p * num_output_copies)()
+                            call_desc.output_memcpy_dsts = (ctypes.c_void_p * num_output_copies)()
+                            call_desc.output_memcpy_sizes = (ctypes.c_size_t * num_output_copies)()
+                            for i in range(num_output_copies):
+                                call_desc.output_memcpy_srcs[i] = output_memcpy_srcs[i]
+                                call_desc.output_memcpy_dsts[i] = output_memcpy_dsts[i]
+                                call_desc.output_memcpy_sizes[i] = output_memcpy_sizes[i]
+
+                            # hang on to the capture and staging arrays to prevent GC
+                            call_desc.capture = capture
+                            call_desc.staging_arrays = staging_arrays
+
+                    elif self.graph_mode == GraphMode.WARP_STAGED_V3B:
+                        insert_memcpy = wp._src.context.runtime.core.wp_cuda_graph_insert_memcpy
+
+                        with nvtx.annotate("staged3b setup"):
+                            # capturing with WARP using staging buffers
+                            callback_arrays = []
+                            staging_arrays = []
+                            for i, arg in enumerate(arg_list):
+                                if i == self.num_inputs:
+                                    # subrange of staging arrays that are inputs (includes in-out args)
+                                    staged_input_range = range(len(staging_arrays))
+                                if isinstance(arg, wp.array):
+                                    callback_arrays.append(arg_list[i])
+                                    staging_arr = wp.empty_like(arg)
+                                    staging_arrays.append(staging_arr)
+                                    arg_list[i] = staging_arr
+
+                            # subrange of staging buffers that are outputs (includes in-out args)
+                            staged_output_range = range(staged_input_range.stop - self.num_in_out, len(staging_arrays))
+
+                            memcpy_nodes = []
+                            memcpy_srcs = []
+                            memcpy_dsts = []
+                            memcpy_sizes = []
+
+                            # capture using staging arrays
+                            with wp.ScopedCapture() as capture:
+                                for i in staged_input_range:
+                                    size = staging_arrays[i].size * type_size_in_bytes(staging_arrays[i].dtype)
+                                    node = insert_memcpy(
+                                        device.context,
+                                        cuda_stream,
+                                        staging_arrays[i].ptr,
+                                        callback_arrays[i].ptr,
+                                        size,
+                                        # !!! FIXME
+                                        0,
+                                    )
+                                    memcpy_nodes.append(node)
+                                    memcpy_srcs.append(callback_arrays[i].ptr)
+                                    memcpy_dsts.append(staging_arrays[i].ptr)
+                                    memcpy_sizes.append(size)
+
+                                self.func(*arg_list)
+
+                                for i in staged_output_range:
+                                    size = staging_arrays[i].size * type_size_in_bytes(staging_arrays[i].dtype)
+                                    node = insert_memcpy(
+                                        device.context,
+                                        cuda_stream,
+                                        callback_arrays[i].ptr,
+                                        staging_arrays[i].ptr,
+                                        size,
+                                        # !!! FIXME
+                                        0,
+                                    )
+                                    memcpy_nodes.append(node)
+                                    memcpy_srcs.append(staging_arrays[i].ptr)
+                                    memcpy_dsts.append(callback_arrays[i].ptr)
+                                    memcpy_sizes.append(size)
+
+                            wp.capture_launch(capture.graph)
+
+                            call_desc.memcpy_input_indices = []
+                            for i, arg in enumerate(self.input_args):
+                                if arg.is_array:
+                                    call_desc.memcpy_input_indices.append(i)
+                            call_desc.memcpy_output_indices = list(range(num_outputs))
+
+                            num_nodes = len(memcpy_nodes)
+                            call_desc.memcpy_nodes = (ctypes.c_void_p * num_nodes)()
+                            call_desc.memcpy_srcs = (ctypes.c_void_p * num_nodes)()
+                            call_desc.memcpy_dsts = (ctypes.c_void_p * num_nodes)()
+                            call_desc.memcpy_sizes = (ctypes.c_size_t * num_nodes)()
+                            for i in range(num_nodes):
+                                call_desc.memcpy_nodes[i] = memcpy_nodes[i]
+                                call_desc.memcpy_srcs[i] = memcpy_srcs[i]
+                                call_desc.memcpy_dsts[i] = memcpy_dsts[i]
+                                call_desc.memcpy_sizes[i] = memcpy_sizes[i]
+
+                            # hang on to the capture and staging arrays to prevent GC
+                            call_desc.capture = capture
+                            call_desc.staging_arrays = staging_arrays
 
                     else:
                         # not capturing

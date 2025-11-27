@@ -925,6 +925,27 @@ bool wp_memcpy_d2d(void* context, void* dest, void* src, size_t n, void* stream)
     return result;
 }
 
+bool wp_memcpy_batch(void* context, void** dest, void** src, size_t* n, size_t count, void* stream)
+{
+    ContextGuard guard(context);
+
+    CUstream cuda_stream;
+    if (stream != WP_CURRENT_STREAM)
+        cuda_stream = static_cast<CUstream>(stream);
+    else
+        cuda_stream = get_current_stream(context);
+
+    begin_cuda_range(WP_TIMING_MEMCPY, cuda_stream, context, "memcpy batch");
+
+    bool result = true;
+    for (size_t i = 0; i < count; i++)
+        result = result && check_cuda(cudaMemcpyAsync(dest[i], src[i], n[i], cudaMemcpyDefault, cuda_stream));
+
+    end_cuda_range(WP_TIMING_MEMCPY, cuda_stream);
+
+    return result;
+}
+
 bool wp_memcpy_p2p(void* dst_context, void* dst, void* src_context, void* src, size_t n, void* stream)
 {
     // ContextGuard guard(context);
@@ -2848,6 +2869,119 @@ bool wp_cuda_graph_create_exec(void* context, void* stream, void* graph, void** 
 
     if (graph_exec_ret)
         *graph_exec_ret = graph_exec;
+
+    return true;
+}
+
+void* wp_cuda_graph_insert_memcpy(void* context, void* stream, void* dst, void* src, size_t n, int kind)
+{
+    // !!! FIXME!!
+    cudaMemcpyKind _kind = cudaMemcpyDeviceToDevice;
+
+    ContextGuard guard(context);
+
+    CUstream cuda_stream = static_cast<CUstream>(stream);
+
+    // Get the current stream capturing graph
+    CUstreamCaptureStatus capture_status = CU_STREAM_CAPTURE_STATUS_NONE;
+    cudaGraph_t graph = NULL;
+    const cudaGraphNode_t* capture_deps = NULL;
+    size_t dep_count = 0;
+    if (!check_cu(cuStreamGetCaptureInfo_f(cuda_stream, &capture_status, nullptr, &graph, &capture_deps, &dep_count)))
+        return NULL;
+
+    // abort if not capturing
+    if (!graph || capture_status != CU_STREAM_CAPTURE_STATUS_ACTIVE)
+    {
+        wp::set_error_string("Stream is not capturing");
+        return NULL;
+    }
+
+    cudaGraphNode_t node = NULL;
+    if (!check_cuda(cudaGraphAddMemcpyNode1D(&node, graph, capture_deps, dep_count, dst, src, n, _kind)))
+        return NULL;
+
+    if (!check_cu(cuStreamUpdateCaptureDependencies_f(cuda_stream, &node, 1, cudaStreamSetCaptureDependencies)))
+        return NULL;
+
+    return node;
+}
+
+bool wp_cuda_graph_insert_memcpy_batch(void* context, void* stream, void** dst, void** src, size_t* n, int* kind, int count, void** nodes_ret)
+{
+    // !!! FIXME!!
+    cudaMemcpyKind _kind = cudaMemcpyDeviceToDevice;
+
+    ContextGuard guard(context);
+
+    CUstream cuda_stream = static_cast<CUstream>(stream);
+
+    // Get the current stream capturing graph
+    CUstreamCaptureStatus capture_status = CU_STREAM_CAPTURE_STATUS_NONE;
+    cudaGraph_t graph = NULL;
+    const cudaGraphNode_t* capture_deps = NULL;
+    size_t dep_count = 0;
+    if (!check_cu(cuStreamGetCaptureInfo_f(cuda_stream, &capture_status, nullptr, &graph, &capture_deps, &dep_count)))
+        return false;
+
+    // abort if not capturing
+    if (!graph || capture_status != CU_STREAM_CAPTURE_STATUS_ACTIVE)
+    {
+        wp::set_error_string("Stream is not capturing");
+        return false;
+    }
+
+    for (int i = 0; i < count; i++)
+    {
+        cudaGraphNode_t node = NULL;
+        if (!check_cuda(cudaGraphAddMemcpyNode1D(&node, graph, capture_deps, dep_count, dst[i], src[i], n[i], _kind)))
+            return false;
+        nodes_ret[i] = node;
+    }
+
+    if (!check_cu(cuStreamUpdateCaptureDependencies_f(cuda_stream, (cudaGraphNode_t*)nodes_ret, count, cudaStreamSetCaptureDependencies)))
+        return false;
+
+    return true;
+}
+
+// !!!
+#include <time.h>
+
+bool wp_cuda_graph_update_memcpy(void* graph_exec, void* node, void* dst, void* src, size_t n, int kind)
+{
+    cudaGraphExec_t cuda_graph_exec = static_cast<cudaGraphExec_t>(graph_exec);
+    cudaGraphNode_t cuda_node = static_cast<cudaGraphNode_t>(node);
+
+    // !!! FIXME!!
+    cudaMemcpyKind _kind = cudaMemcpyDeviceToDevice;
+
+    // clock_t t1 = clock();
+    if (!check_cuda(cudaGraphExecMemcpyNodeSetParams1D(cuda_graph_exec, cuda_node, dst, src, n, _kind)))
+        return false;
+    // clock_t t2 = clock();
+    // printf("~!~!~! t = %f us\n", (t2 - t1) / double(CLOCKS_PER_SEC) * 1000000.0);
+
+    return true;
+}
+
+bool wp_cuda_graph_update_memcpy_batch(void* graph_exec, void** node, void** dst, void** src, size_t* n, int* kind, int count)
+{
+    cudaGraphExec_t cuda_graph_exec = static_cast<cudaGraphExec_t>(graph_exec);
+
+    for (int i = 0; i < count; i++)
+    {
+        cudaGraphNode_t cuda_node = static_cast<cudaGraphNode_t>(node[i]);
+
+        // !!! FIXME!!
+        cudaMemcpyKind _kind = cudaMemcpyDeviceToDevice;
+
+        // clock_t t1 = clock();
+        if (!check_cuda(cudaGraphExecMemcpyNodeSetParams1D(cuda_graph_exec, cuda_node, dst[i], src[i], n[i], _kind)))
+            return false;
+        // clock_t t2 = clock();
+        // printf("~!~!~! t = %f us\n", (t2 - t1) / double(CLOCKS_PER_SEC) * 1000000.0);
+    }
 
     return true;
 }

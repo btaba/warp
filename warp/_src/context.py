@@ -3780,6 +3780,16 @@ class Runtime:
             ]
             self.core.wp_memcpy_p2p.restype = ctypes.c_bool
 
+            self.core.wp_memcpy_batch.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_size_t,
+                ctypes.c_void_p,
+            ]
+            self.core.wp_memcpy_batch.restype = ctypes.c_bool
+
             self.core.wp_array_copy_host.argtypes = [
                 ctypes.c_void_p,
                 ctypes.c_void_p,
@@ -4400,6 +4410,37 @@ class Runtime:
 
             self.core.wp_cuda_graph_check_conditional_body.argtypes = [ctypes.c_void_p]
             self.core.wp_cuda_graph_check_conditional_body.restype = ctypes.c_bool
+
+            self.core.wp_cuda_graph_insert_memcpy.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_size_t,
+                ctypes.c_int,
+            ]
+            self.core.wp_cuda_graph_insert_memcpy.restype = ctypes.c_void_p
+
+            self.core.wp_cuda_graph_update_memcpy.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_size_t,
+                ctypes.c_int,
+            ]
+            self.core.wp_cuda_graph_update_memcpy.restype = ctypes.c_bool
+
+            self.core.wp_cuda_graph_update_memcpy_batch.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_int,
+            ]
+            self.core.wp_cuda_graph_update_memcpy_batch.restype = ctypes.c_bool
 
             self.core.wp_cuda_compile_program.argtypes = [
                 ctypes.c_char_p,  # cuda_src
