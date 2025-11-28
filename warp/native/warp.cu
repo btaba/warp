@@ -1023,8 +1023,6 @@ bool wp_memcpy_p2p(void* dst_context, void* dst, void* src_context, void* src, s
 
 bool wp_memcpy_batch(void* context, void** dsts, void** srcs, size_t* sizes, size_t count, void* stream)
 {
-    // TODO: cudaMemcpyBatchAsync() with CUDA 12.8+
-
     ContextGuard guard(context);
 
     CUstream cuda_stream;
