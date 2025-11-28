@@ -1,3 +1,5 @@
+# ruff: noqa
+
 from functools import partial
 
 import jax
@@ -100,7 +102,9 @@ def example1():
     print(h)
 
 
-def bench1(graph_mode=GRAPH_MODE, num_elements=10_000, num_iters=1000, reuse_arrays=False, use_nvtx=False, verbose=True):
+def bench1(
+    graph_mode=GRAPH_MODE, num_elements=10_000, num_iters=1000, reuse_arrays=False, use_nvtx=False, verbose=True
+):
     jax_func = jax_callable(scale_func, num_outputs=4, in_out_argnames=["c", "d"], graph_mode=graph_mode)
 
     @jax.jit
@@ -114,7 +118,7 @@ def bench1(graph_mode=GRAPH_MODE, num_elements=10_000, num_iters=1000, reuse_arr
     times = []
 
     # retain arrays to force cache misses
-    retained_arrays = [] 
+    retained_arrays = []
 
     a = jnp.arange(num_elements, dtype=jnp.float32)
     b = jnp.arange(num_elements, dtype=jnp.float32).reshape((num_elements // 2, 2))  # wp.vec2
@@ -125,7 +129,7 @@ def bench1(graph_mode=GRAPH_MODE, num_elements=10_000, num_iters=1000, reuse_arr
         wp.synchronize()
         with wp.ScopedTimer(f"iter_{iter}", synchronize=True, print=False, use_nvtx=use_nvtx) as timer:
             e, f, g, h = fun(a, b, c, d)
-        
+
         times.append(timer.elapsed)
 
         if not reuse_arrays:
@@ -154,7 +158,7 @@ time_1 = bench1(GraphMode.WARP, reuse_arrays=True, verbose=False)
 time_2 = bench1(GraphMode.WARP, reuse_arrays=False, verbose=False)
 time_3 = bench1(GraphMode.WARP_STAGED, verbose=False)
 time_4 = bench1(GraphMode.WARP_STAGED_INCLUSIVE, verbose=False)
-print(f"{time_1 :.4f} ms (WARP, reuse arrays)")
-print(f"{time_2 :.4f} ms (WARP, recapture)")
-print(f"{time_3 :.4f} ms (WARP_STAGED)")
-print(f"{time_4 :.4f} ms (WARP_STAGED_INCLUSIVE)")
+print(f"{time_1:.4f} ms (WARP, reuse arrays)")
+print(f"{time_2:.4f} ms (WARP, recapture)")
+print(f"{time_3:.4f} ms (WARP_STAGED)")
+print(f"{time_4:.4f} ms (WARP_STAGED_INCLUSIVE)")

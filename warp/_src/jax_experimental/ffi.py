@@ -27,14 +27,9 @@ import warp as wp
 from warp._src.codegen import get_full_arg_spec, make_full_qualified_name
 from warp._src.context import CudaMemcpyKind
 from warp._src.jax import get_jax_device
-from warp._src.types import array_t, launch_bounds_t, strides_from_shape, type_to_warp, type_size_in_bytes
+from warp._src.types import array_t, launch_bounds_t, strides_from_shape, type_size_in_bytes, type_to_warp
 
 from .xla_ffi import *
-
-# !!!
-import nvtx
-import time
-
 
 # Type alias for differentiable kernel cache key
 DiffKernelCacheKey = tuple[Callable, tuple, int, str, tuple[str, ...]]
@@ -823,7 +818,9 @@ class FfiCallable:
                         output_memcpy_dsts = (ctypes.c_void_p * num_output_copies)()
                         output_memcpy_sizes = (ctypes.c_size_t * num_output_copies)()
                         for memcpy_idx, output_idx in enumerate(staged_output_range):
-                            size = staging_arrays[output_idx].size * type_size_in_bytes(staging_arrays[output_idx].dtype)
+                            size = staging_arrays[output_idx].size * type_size_in_bytes(
+                                staging_arrays[output_idx].dtype
+                            )
                             output_memcpy_srcs[memcpy_idx] = staging_arrays[output_idx].ptr
                             output_memcpy_dsts[memcpy_idx] = callback_arrays[output_idx].ptr
                             output_memcpy_sizes[memcpy_idx] = size
@@ -876,7 +873,9 @@ class FfiCallable:
 
                     elif self.graph_mode == GraphMode.WARP_STAGED_INCLUSIVE:
                         # capturing with WARP using staging buffers and memcopies done inside of the graph
-                        wp_cuda_graph_insert_memcpy_batch = wp._src.context.runtime.core.wp_cuda_graph_insert_memcpy_batch
+                        wp_cuda_graph_insert_memcpy_batch = (
+                            wp._src.context.runtime.core.wp_cuda_graph_insert_memcpy_batch
+                        )
 
                         # capturing with WARP using staging buffers
                         callback_arrays = []
@@ -916,7 +915,9 @@ class FfiCallable:
                         output_memcpy_sizes = (ctypes.c_size_t * num_output_copies)()
                         output_memcpy_kinds = (ctypes.c_int * num_output_copies)()
                         for memcpy_idx, output_idx in enumerate(staged_output_range):
-                            size = staging_arrays[output_idx].size * type_size_in_bytes(staging_arrays[output_idx].dtype)
+                            size = staging_arrays[output_idx].size * type_size_in_bytes(
+                                staging_arrays[output_idx].dtype
+                            )
                             output_memcpy_srcs[memcpy_idx] = staging_arrays[output_idx].ptr
                             output_memcpy_dsts[memcpy_idx] = callback_arrays[output_idx].ptr
                             output_memcpy_sizes[memcpy_idx] = size
