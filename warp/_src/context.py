@@ -62,6 +62,15 @@ _wp_module_name_ = "warp.context"
 
 warp_home = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
 
+
+class CudaMemcpyKind(enum.IntEnum):
+    H2H = 0
+    H2D = 1
+    D2H = 2
+    D2D = 3
+    Default = 4
+
+
 # represents either a built-in or user-defined function
 
 
@@ -4420,6 +4429,18 @@ class Runtime:
                 ctypes.c_int,
             ]
             self.core.wp_cuda_graph_insert_memcpy.restype = ctypes.c_void_p
+
+            self.core.wp_cuda_graph_insert_memcpy_batch.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_void_p,
+            ]
+            self.core.wp_cuda_graph_insert_memcpy_batch.restype = ctypes.c_bool
 
             self.core.wp_cuda_graph_update_memcpy.argtypes = [
                 ctypes.c_void_p,

@@ -437,6 +437,7 @@ WP_API bool wp_cuda_graph_insert_child_graph(void* context, void* stream, void* 
 WP_API bool wp_cuda_graph_check_conditional_body(void* body_graph);
 
 WP_API void* wp_cuda_graph_insert_memcpy(void* context, void* stream, void* dst, void* src, size_t n, int kind);
+WP_API bool wp_cuda_graph_insert_memcpy_batch(void* context, void* stream, void** dst, void** src, size_t* n, int* kind, int count, void** nodes_ret);
 WP_API bool wp_cuda_graph_update_memcpy(void* graph_exec, void* node, void* dst, void* src, size_t n, int kind);
 WP_API bool wp_cuda_graph_update_memcpy_batch(void* graph_exec, void** node, void** dst, void** src, size_t* n, int* kind, int count);
 

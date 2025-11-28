@@ -925,8 +925,10 @@ bool wp_memcpy_d2d(void* context, void* dest, void* src, size_t n, void* stream)
     return result;
 }
 
-bool wp_memcpy_batch(void* context, void** dest, void** src, size_t* n, size_t count, void* stream)
+bool wp_memcpy_batch(void* context, void** dsts, void** srcs, size_t* sizes, size_t count, void* stream)
 {
+    // TODO: cudaMemcpyBatchAsync() with CUDA 12.8+
+
     ContextGuard guard(context);
 
     CUstream cuda_stream;
@@ -938,8 +940,26 @@ bool wp_memcpy_batch(void* context, void** dest, void** src, size_t* n, size_t c
     begin_cuda_range(WP_TIMING_MEMCPY, cuda_stream, context, "memcpy batch");
 
     bool result = true;
+
+#if CUDA_VERSION >= 12080
+    if (wp_cuda_driver_version() >= 12080)
+    {
+        CUmemcpyAttributes attr = {};
+        attr.srcAccessOrder = CU_MEMCPY_SRC_ACCESS_ORDER_STREAM;
+        // attr.flags = CU_MEMCPY_FLAG_PREFER_OVERLAP_WITH_COMPUTE;
+        size_t attr_idx = 0;
+        size_t fail_idx = 0;
+        result = check_cuda(cuMemcpyBatchAsync_f((CUdeviceptr*)dsts, (CUdeviceptr*)srcs, sizes, count, &attr, &attr_idx, 1, &fail_idx, cuda_stream));
+    }
+    else
+    {
+        for (size_t i = 0; i < count; i++)
+            result = result && check_cuda(cudaMemcpyAsync(dsts[i], srcs[i], sizes[i], cudaMemcpyDefault, cuda_stream));
+    }
+#else
     for (size_t i = 0; i < count; i++)
-        result = result && check_cuda(cudaMemcpyAsync(dest[i], src[i], n[i], cudaMemcpyDefault, cuda_stream));
+        result = result && check_cuda(cudaMemcpyAsync(dsts[i], srcs[i], sizes[i], cudaMemcpyDefault, cuda_stream));
+#endif
 
     end_cuda_range(WP_TIMING_MEMCPY, cuda_stream);
 
@@ -2875,12 +2895,10 @@ bool wp_cuda_graph_create_exec(void* context, void* stream, void* graph, void** 
 
 void* wp_cuda_graph_insert_memcpy(void* context, void* stream, void* dst, void* src, size_t n, int kind)
 {
-    // !!! FIXME!!
-    cudaMemcpyKind _kind = cudaMemcpyDeviceToDevice;
-
     ContextGuard guard(context);
 
     CUstream cuda_stream = static_cast<CUstream>(stream);
+    cudaMemcpyKind memcpy_kind = static_cast<cudaMemcpyKind>(kind);
 
     // Get the current stream capturing graph
     CUstreamCaptureStatus capture_status = CU_STREAM_CAPTURE_STATUS_NONE;
@@ -2898,7 +2916,7 @@ void* wp_cuda_graph_insert_memcpy(void* context, void* stream, void* dst, void* 
     }
 
     cudaGraphNode_t node = NULL;
-    if (!check_cuda(cudaGraphAddMemcpyNode1D(&node, graph, capture_deps, dep_count, dst, src, n, _kind)))
+    if (!check_cuda(cudaGraphAddMemcpyNode1D(&node, graph, capture_deps, dep_count, dst, src, n, memcpy_kind)))
         return NULL;
 
     if (!check_cu(cuStreamUpdateCaptureDependencies_f(cuda_stream, &node, 1, cudaStreamSetCaptureDependencies)))
@@ -2909,9 +2927,6 @@ void* wp_cuda_graph_insert_memcpy(void* context, void* stream, void* dst, void* 
 
 bool wp_cuda_graph_insert_memcpy_batch(void* context, void* stream, void** dst, void** src, size_t* n, int* kind, int count, void** nodes_ret)
 {
-    // !!! FIXME!!
-    cudaMemcpyKind _kind = cudaMemcpyDeviceToDevice;
-
     ContextGuard guard(context);
 
     CUstream cuda_stream = static_cast<CUstream>(stream);
@@ -2931,36 +2946,54 @@ bool wp_cuda_graph_insert_memcpy_batch(void* context, void* stream, void** dst, 
         return false;
     }
 
+#if 1
+    // sequential version (copies executed on the same stream)
+    //
+    // TODO:
+    // - figure out why sequential is faster
+    // - overhead due to graph launch on multiple streams?
+    //
+
     for (int i = 0; i < count; i++)
     {
+        if (!check_cu(cuStreamGetCaptureInfo_f(cuda_stream, &capture_status, nullptr, &graph, &capture_deps, &dep_count)))
+            return false;
+
+        cudaMemcpyKind memcpy_kind = static_cast<cudaMemcpyKind>(kind[i]);
         cudaGraphNode_t node = NULL;
-        if (!check_cuda(cudaGraphAddMemcpyNode1D(&node, graph, capture_deps, dep_count, dst[i], src[i], n[i], _kind)))
+        if (!check_cuda(cudaGraphAddMemcpyNode1D(&node, graph, capture_deps, dep_count, dst[i], src[i], n[i], memcpy_kind)))
+            return false;
+        nodes_ret[i] = node;
+
+        if (!check_cu(cuStreamUpdateCaptureDependencies_f(cuda_stream, &node, 1, cudaStreamSetCaptureDependencies)))
+            return NULL;
+    }
+#else
+    // parallel version (copies can execute on multiple streams)
+    for (int i = 0; i < count; i++)
+    {
+        cudaMemcpyKind memcpy_kind = static_cast<cudaMemcpyKind>(kind[i]);
+        cudaGraphNode_t node = NULL;
+        if (!check_cuda(cudaGraphAddMemcpyNode1D(&node, graph, capture_deps, dep_count, dst[i], src[i], n[i], memcpy_kind)))
             return false;
         nodes_ret[i] = node;
     }
 
     if (!check_cu(cuStreamUpdateCaptureDependencies_f(cuda_stream, (cudaGraphNode_t*)nodes_ret, count, cudaStreamSetCaptureDependencies)))
         return false;
+#endif
 
     return true;
 }
-
-// !!!
-#include <time.h>
 
 bool wp_cuda_graph_update_memcpy(void* graph_exec, void* node, void* dst, void* src, size_t n, int kind)
 {
     cudaGraphExec_t cuda_graph_exec = static_cast<cudaGraphExec_t>(graph_exec);
     cudaGraphNode_t cuda_node = static_cast<cudaGraphNode_t>(node);
+    cudaMemcpyKind memcpy_kind = static_cast<cudaMemcpyKind>(kind);
 
-    // !!! FIXME!!
-    cudaMemcpyKind _kind = cudaMemcpyDeviceToDevice;
-
-    // clock_t t1 = clock();
-    if (!check_cuda(cudaGraphExecMemcpyNodeSetParams1D(cuda_graph_exec, cuda_node, dst, src, n, _kind)))
+    if (!check_cuda(cudaGraphExecMemcpyNodeSetParams1D(cuda_graph_exec, cuda_node, dst, src, n, memcpy_kind)))
         return false;
-    // clock_t t2 = clock();
-    // printf("~!~!~! t = %f us\n", (t2 - t1) / double(CLOCKS_PER_SEC) * 1000000.0);
 
     return true;
 }
@@ -2976,11 +3009,8 @@ bool wp_cuda_graph_update_memcpy_batch(void* graph_exec, void** node, void** dst
         // !!! FIXME!!
         cudaMemcpyKind _kind = cudaMemcpyDeviceToDevice;
 
-        // clock_t t1 = clock();
         if (!check_cuda(cudaGraphExecMemcpyNodeSetParams1D(cuda_graph_exec, cuda_node, dst[i], src[i], n[i], _kind)))
             return false;
-        // clock_t t2 = clock();
-        // printf("~!~!~! t = %f us\n", (t2 - t1) / double(CLOCKS_PER_SEC) * 1000000.0);
     }
 
     return true;

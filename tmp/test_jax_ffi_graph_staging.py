@@ -7,7 +7,7 @@ import warp as wp
 from warp.jax_experimental import jax_callable, GraphMode
 
 
-GRAPH_MODE = GraphMode.WARP
+GRAPH_MODE = GraphMode.WARP_STAGED_INCLUSIVE
 
 
 @wp.kernel
@@ -100,7 +100,7 @@ def example1():
     print(h)
 
 
-def bench1(graph_mode=GRAPH_MODE, num_elements=10_000, num_iters=1000, reuse_arrays=False, verbose=True):
+def bench1(graph_mode=GRAPH_MODE, num_elements=10_000, num_iters=1000, reuse_arrays=False, use_nvtx=False, verbose=True):
     jax_func = jax_callable(scale_func, num_outputs=4, in_out_argnames=["c", "d"], graph_mode=graph_mode)
 
     @jax.jit
@@ -123,7 +123,7 @@ def bench1(graph_mode=GRAPH_MODE, num_elements=10_000, num_iters=1000, reuse_arr
 
     for iter in range(num_iters):
         wp.synchronize()
-        with wp.ScopedTimer(f"iter_{iter}", synchronize=True, print=False, use_nvtx=True) as timer:
+        with wp.ScopedTimer(f"iter_{iter}", synchronize=True, print=False, use_nvtx=use_nvtx) as timer:
             e, f, g, h = fun(a, b, c, d)
         
         times.append(timer.elapsed)
@@ -148,20 +148,13 @@ def bench1(graph_mode=GRAPH_MODE, num_elements=10_000, num_iters=1000, reuse_arr
 
 
 # example1()
-# bench1()
+# bench1(use_nvtx=True)
 
-time_00 = bench1(GraphMode.WARP, reuse_arrays=True, verbose=False)
-time_01 = bench1(GraphMode.WARP, reuse_arrays=False, verbose=False)
-time_1 = bench1(GraphMode.WARP_STAGED, verbose=False)
-time_2 = bench1(GraphMode.WARP_STAGED_V2, verbose=False)
-time_2b = bench1(GraphMode.WARP_STAGED_V2B, verbose=False)
-time_3 = bench1(GraphMode.WARP_STAGED_V3, verbose=False)
-time_3b = bench1(GraphMode.WARP_STAGED_V3B, verbose=False)
-
-print(f"{time_00 :.4f} ms (WARP, reuse arrays)")
-print(f"{time_01 :.4f} ms (WARP, recapture)")
-print(f"{time_1 :.4f} ms (WARP_STAGED)")
-print(f"{time_2 :.4f} ms (WARP_STAGED_V2)")
-print(f"{time_2b :.4f} ms (WARP_STAGED_V2B)")
-print(f"{time_3 :.4f} ms (WARP_STAGED_V3)")
-print(f"{time_3b :.4f} ms (WARP_STAGED_V3B)")
+time_1 = bench1(GraphMode.WARP, reuse_arrays=True, verbose=False)
+time_2 = bench1(GraphMode.WARP, reuse_arrays=False, verbose=False)
+time_3 = bench1(GraphMode.WARP_STAGED, verbose=False)
+time_4 = bench1(GraphMode.WARP_STAGED_INCLUSIVE, verbose=False)
+print(f"{time_1 :.4f} ms (WARP, reuse arrays)")
+print(f"{time_2 :.4f} ms (WARP, recapture)")
+print(f"{time_3 :.4f} ms (WARP_STAGED)")
+print(f"{time_4 :.4f} ms (WARP_STAGED_INCLUSIVE)")
