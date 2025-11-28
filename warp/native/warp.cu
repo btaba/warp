@@ -2891,7 +2891,7 @@ bool wp_cuda_graph_create_exec(void* context, void* stream, void* graph, void** 
     return true;
 }
 
-void* wp_cuda_graph_insert_memcpy(void* context, void* stream, void* dst, void* src, size_t n, int kind)
+void* wp_cuda_graph_insert_memcpy(void* context, void* stream, void* dst, void* src, size_t size, int kind)
 {
     ContextGuard guard(context);
 
@@ -2914,7 +2914,7 @@ void* wp_cuda_graph_insert_memcpy(void* context, void* stream, void* dst, void* 
     }
 
     cudaGraphNode_t node = NULL;
-    if (!check_cuda(cudaGraphAddMemcpyNode1D(&node, graph, capture_deps, dep_count, dst, src, n, memcpy_kind)))
+    if (!check_cuda(cudaGraphAddMemcpyNode1D(&node, graph, capture_deps, dep_count, dst, src, size, memcpy_kind)))
         return NULL;
 
     if (!check_cu(cuStreamUpdateCaptureDependencies_f(cuda_stream, &node, 1, cudaStreamSetCaptureDependencies)))
@@ -2923,7 +2923,7 @@ void* wp_cuda_graph_insert_memcpy(void* context, void* stream, void* dst, void* 
     return node;
 }
 
-bool wp_cuda_graph_insert_memcpy_batch(void* context, void* stream, void** dst, void** src, size_t* n, int* kind, int count, void** nodes_ret)
+bool wp_cuda_graph_insert_memcpy_batch(void* context, void* stream, void** dsts, void** srcs, size_t* sizes, int* kinds, int count, void** nodes_ret)
 {
     ContextGuard guard(context);
 
@@ -2957,9 +2957,9 @@ bool wp_cuda_graph_insert_memcpy_batch(void* context, void* stream, void** dst, 
         if (!check_cu(cuStreamGetCaptureInfo_f(cuda_stream, &capture_status, nullptr, &graph, &capture_deps, &dep_count)))
             return false;
 
-        cudaMemcpyKind memcpy_kind = static_cast<cudaMemcpyKind>(kind[i]);
+        cudaMemcpyKind memcpy_kind = static_cast<cudaMemcpyKind>(kinds[i]);
         cudaGraphNode_t node = NULL;
-        if (!check_cuda(cudaGraphAddMemcpyNode1D(&node, graph, capture_deps, dep_count, dst[i], src[i], n[i], memcpy_kind)))
+        if (!check_cuda(cudaGraphAddMemcpyNode1D(&node, graph, capture_deps, dep_count, dsts[i], srcs[i], sizes[i], memcpy_kind)))
             return false;
         nodes_ret[i] = node;
 
@@ -2970,9 +2970,9 @@ bool wp_cuda_graph_insert_memcpy_batch(void* context, void* stream, void** dst, 
     // parallel version (copies can execute on multiple streams)
     for (int i = 0; i < count; i++)
     {
-        cudaMemcpyKind memcpy_kind = static_cast<cudaMemcpyKind>(kind[i]);
+        cudaMemcpyKind memcpy_kind = static_cast<cudaMemcpyKind>(kinds[i]);
         cudaGraphNode_t node = NULL;
-        if (!check_cuda(cudaGraphAddMemcpyNode1D(&node, graph, capture_deps, dep_count, dst[i], src[i], n[i], memcpy_kind)))
+        if (!check_cuda(cudaGraphAddMemcpyNode1D(&node, graph, capture_deps, dep_count, dsts[i], srcs[i], sizes[i], memcpy_kind)))
             return false;
         nodes_ret[i] = node;
     }
@@ -2984,28 +2984,28 @@ bool wp_cuda_graph_insert_memcpy_batch(void* context, void* stream, void** dst, 
     return true;
 }
 
-bool wp_cuda_graph_update_memcpy(void* graph_exec, void* node, void* dst, void* src, size_t n, int kind)
+bool wp_cuda_graph_update_memcpy(void* graph_exec, void* node, void* dst, void* src, size_t size, int kind)
 {
     cudaGraphExec_t cuda_graph_exec = static_cast<cudaGraphExec_t>(graph_exec);
     cudaGraphNode_t cuda_node = static_cast<cudaGraphNode_t>(node);
     cudaMemcpyKind memcpy_kind = static_cast<cudaMemcpyKind>(kind);
 
-    if (!check_cuda(cudaGraphExecMemcpyNodeSetParams1D(cuda_graph_exec, cuda_node, dst, src, n, memcpy_kind)))
+    if (!check_cuda(cudaGraphExecMemcpyNodeSetParams1D(cuda_graph_exec, cuda_node, dst, src, size, memcpy_kind)))
         return false;
 
     return true;
 }
 
-bool wp_cuda_graph_update_memcpy_batch(void* graph_exec, void** node, void** dst, void** src, size_t* n, int* kind, int count)
+bool wp_cuda_graph_update_memcpy_batch(void* graph_exec, void** nodes, void** dsts, void** srcs, size_t* sizes, int* kinds, int count)
 {
     cudaGraphExec_t cuda_graph_exec = static_cast<cudaGraphExec_t>(graph_exec);
 
     for (int i = 0; i < count; i++)
     {
-        cudaGraphNode_t cuda_node = static_cast<cudaGraphNode_t>(node[i]);
-        cudaMemcpyKind memcpy_kind = static_cast<cudaMemcpyKind>(kind[i]);
+        cudaGraphNode_t cuda_node = static_cast<cudaGraphNode_t>(nodes[i]);
+        cudaMemcpyKind memcpy_kind = static_cast<cudaMemcpyKind>(kinds[i]);
 
-        if (!check_cuda(cudaGraphExecMemcpyNodeSetParams1D(cuda_graph_exec, cuda_node, dst[i], src[i], n[i], memcpy_kind)))
+        if (!check_cuda(cudaGraphExecMemcpyNodeSetParams1D(cuda_graph_exec, cuda_node, dsts[i], srcs[i], sizes[i], memcpy_kind)))
             return false;
     }
 
