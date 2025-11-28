@@ -2964,7 +2964,7 @@ bool wp_cuda_graph_insert_memcpy_batch(void* context, void* stream, void** dsts,
         nodes_ret[i] = node;
 
         if (!check_cu(cuStreamUpdateCaptureDependencies_f(cuda_stream, &node, 1, cudaStreamSetCaptureDependencies)))
-            return NULL;
+            return false;
     }
 #else
     // parallel version (copies can execute on multiple streams)
