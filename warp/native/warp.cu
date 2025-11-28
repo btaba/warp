@@ -925,47 +925,6 @@ bool wp_memcpy_d2d(void* context, void* dest, void* src, size_t n, void* stream)
     return result;
 }
 
-bool wp_memcpy_batch(void* context, void** dsts, void** srcs, size_t* sizes, size_t count, void* stream)
-{
-    // TODO: cudaMemcpyBatchAsync() with CUDA 12.8+
-
-    ContextGuard guard(context);
-
-    CUstream cuda_stream;
-    if (stream != WP_CURRENT_STREAM)
-        cuda_stream = static_cast<CUstream>(stream);
-    else
-        cuda_stream = get_current_stream(context);
-
-    begin_cuda_range(WP_TIMING_MEMCPY, cuda_stream, context, "memcpy batch");
-
-    bool result = true;
-
-#if CUDA_VERSION >= 12080
-    if (wp_cuda_driver_version() >= 12080)
-    {
-        CUmemcpyAttributes attr = {};
-        attr.srcAccessOrder = CU_MEMCPY_SRC_ACCESS_ORDER_STREAM;
-        // attr.flags = CU_MEMCPY_FLAG_PREFER_OVERLAP_WITH_COMPUTE;
-        size_t attr_idx = 0;
-        size_t fail_idx = 0;
-        result = check_cuda(cuMemcpyBatchAsync_f((CUdeviceptr*)dsts, (CUdeviceptr*)srcs, sizes, count, &attr, &attr_idx, 1, &fail_idx, cuda_stream));
-    }
-    else
-    {
-        for (size_t i = 0; i < count; i++)
-            result = result && check_cuda(cudaMemcpyAsync(dsts[i], srcs[i], sizes[i], cudaMemcpyDefault, cuda_stream));
-    }
-#else
-    for (size_t i = 0; i < count; i++)
-        result = result && check_cuda(cudaMemcpyAsync(dsts[i], srcs[i], sizes[i], cudaMemcpyDefault, cuda_stream));
-#endif
-
-    end_cuda_range(WP_TIMING_MEMCPY, cuda_stream);
-
-    return result;
-}
-
 bool wp_memcpy_p2p(void* dst_context, void* dst, void* src_context, void* src, size_t n, void* stream)
 {
     // ContextGuard guard(context);
@@ -1060,6 +1019,47 @@ bool wp_memcpy_p2p(void* dst_context, void* dst, void* src_context, void* src, s
 
         return true;
     }
+}
+
+bool wp_memcpy_batch(void* context, void** dsts, void** srcs, size_t* sizes, size_t count, void* stream)
+{
+    // TODO: cudaMemcpyBatchAsync() with CUDA 12.8+
+
+    ContextGuard guard(context);
+
+    CUstream cuda_stream;
+    if (stream != WP_CURRENT_STREAM)
+        cuda_stream = static_cast<CUstream>(stream);
+    else
+        cuda_stream = get_current_stream(context);
+
+    begin_cuda_range(WP_TIMING_MEMCPY, cuda_stream, context, "memcpy batch");
+
+    bool result = true;
+
+#if CUDA_VERSION >= 12080
+    if (wp_cuda_driver_version() >= 12080)
+    {
+        CUmemcpyAttributes attr = {};
+        attr.srcAccessOrder = CU_MEMCPY_SRC_ACCESS_ORDER_STREAM;
+        // attr.flags = CU_MEMCPY_FLAG_PREFER_OVERLAP_WITH_COMPUTE;
+        size_t attr_idx = 0;
+        size_t fail_idx = 0;
+        result = check_cuda(cuMemcpyBatchAsync_f((CUdeviceptr*)dsts, (CUdeviceptr*)srcs, sizes, count, &attr, &attr_idx, 1, &fail_idx, cuda_stream));
+    }
+    else
+    {
+        for (size_t i = 0; i < count; i++)
+            result = result && check_cuda(cudaMemcpyAsync(dsts[i], srcs[i], sizes[i], cudaMemcpyDefault, cuda_stream));
+    }
+#else
+    for (size_t i = 0; i < count; i++)
+        result = result && check_cuda(cudaMemcpyAsync(dsts[i], srcs[i], sizes[i], cudaMemcpyDefault, cuda_stream));
+#endif
+
+    end_cuda_range(WP_TIMING_MEMCPY, cuda_stream);
+
+    return result;
 }
 
 
