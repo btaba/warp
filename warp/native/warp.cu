@@ -3005,11 +3005,9 @@ bool wp_cuda_graph_update_memcpy_batch(void* graph_exec, void** node, void** dst
     for (int i = 0; i < count; i++)
     {
         cudaGraphNode_t cuda_node = static_cast<cudaGraphNode_t>(node[i]);
+        cudaMemcpyKind memcpy_kind = static_cast<cudaMemcpyKind>(kind[i]);
 
-        // !!! FIXME!!
-        cudaMemcpyKind _kind = cudaMemcpyDeviceToDevice;
-
-        if (!check_cuda(cudaGraphExecMemcpyNodeSetParams1D(cuda_graph_exec, cuda_node, dst[i], src[i], n[i], _kind)))
+        if (!check_cuda(cudaGraphExecMemcpyNodeSetParams1D(cuda_graph_exec, cuda_node, dst[i], src[i], n[i], memcpy_kind)))
             return false;
     }
 
