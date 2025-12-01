@@ -437,9 +437,21 @@ CUresult cuMemGetInfo_f(size_t* free, size_t* total)
 }
 
 #if CUDA_VERSION >= 12080
-CUresult cuMemcpyBatchAsync_f(CUdeviceptr* dsts, CUdeviceptr* srcs, size_t* sizes, size_t count, CUmemcpyAttributes* attrs, size_t* attrsIdxs, size_t numAttrs, size_t *failIdx, CUstream hStream)
+CUresult cuMemcpyBatchAsync_f(
+    CUdeviceptr* dsts,
+    CUdeviceptr* srcs,
+    size_t* sizes,
+    size_t count,
+    CUmemcpyAttributes* attrs,
+    size_t* attrsIdxs,
+    size_t numAttrs,
+    size_t* failIdx,
+    CUstream hStream
+)
 {
-    return pfn_cuMemcpyBatchAsync ? pfn_cuMemcpyBatchAsync(dsts, srcs, sizes, count, attrs, attrsIdxs, numAttrs, failIdx, hStream) : DRIVER_ENTRY_POINT_ERROR;
+    return pfn_cuMemcpyBatchAsync
+        ? pfn_cuMemcpyBatchAsync(dsts, srcs, sizes, count, attrs, attrsIdxs, numAttrs, failIdx, hStream)
+        : DRIVER_ENTRY_POINT_ERROR;
 }
 #endif
 
