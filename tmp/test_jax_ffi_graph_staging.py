@@ -1,6 +1,13 @@
 # ruff: noqa
 
-from functools import partial
+import os
+
+#
+# set XLA flags
+#
+os.environ["XLA_FLAGS"] = (
+    "--xla_gpu_graph_min_graph_size=1"
+)
 
 import jax
 import jax.numpy as jnp
@@ -61,11 +68,12 @@ def example1():
 
     @jax.jit
     def fun(a, b, c, d):
-        s = 2.0
+        # s = 2.0
 
-        # output shapes
-        output_dims = {"e": a.shape, "f": b.shape}
-        return jax_func(a, b, c, d, s, output_dims=output_dims)
+        # # output shapes
+        # output_dims = {"e": a.shape, "f": b.shape}
+        # return jax_func(a, b, c, d, s, output_dims=output_dims)
+        return jax_func(a, b, c, d, 2.0, output_dims={"e": a.shape, "f": b.shape})
 
     a = jnp.arange(10, dtype=jnp.float32)
     b = jnp.arange(10, dtype=jnp.float32).reshape((5, 2))  # wp.vec2
@@ -103,7 +111,7 @@ def example1():
 
 
 def bench1(
-    graph_mode=GRAPH_MODE, num_elements=10_000, num_iters=1000, reuse_arrays=False, use_nvtx=False, verbose=True
+    graph_mode=GRAPH_MODE, num_elements=10_000, num_iters=1000, reuse_arrays=False, use_nvtx=False
 ):
     jax_func = jax_callable(scale_func, num_outputs=4, in_out_argnames=["c", "d"], graph_mode=graph_mode)
 
@@ -132,7 +140,11 @@ def bench1(
 
         times.append(timer.elapsed)
 
-        if not reuse_arrays:
+        if reuse_arrays:
+            # allows JAX to reuse same outputs on next iteration
+            del e, f, g, h
+        else:
+            # retain all input and output arrays to prevent reuse
             retained_arrays.extend([a, b, c, d, e, f, g, h])
             a = a.copy()
             b = b.copy()
@@ -145,20 +157,25 @@ def bench1(
 
     avg_time = sum(times) / len(times)
 
-    if verbose:
-        print(f"{avg_time} ms")
-
     return avg_time
 
 
 # example1()
-# bench1(use_nvtx=True)
+# print(bench1(use_nvtx=True, reuse_arrays=True))
+# print(bench1(use_nvtx=True, reuse_arrays=False))
 
-time_1 = bench1(GraphMode.WARP, reuse_arrays=True, verbose=False)
-time_2 = bench1(GraphMode.WARP, reuse_arrays=False, verbose=False)
-time_3 = bench1(GraphMode.WARP_STAGED, verbose=False)
-time_4 = bench1(GraphMode.WARP_STAGED_INCLUSIVE, verbose=False)
-print(f"{time_1:.4f} ms (WARP, reuse arrays)")
-print(f"{time_2:.4f} ms (WARP, recapture)")
+
+time_0 = bench1(GraphMode.NONE)
+time_1a = bench1(GraphMode.JAX, reuse_arrays=True)
+time_1b = bench1(GraphMode.JAX, reuse_arrays=False)
+time_2a = bench1(GraphMode.WARP, reuse_arrays=True)
+time_2b = bench1(GraphMode.WARP, reuse_arrays=False)
+time_3 = bench1(GraphMode.WARP_STAGED)
+time_4 = bench1(GraphMode.WARP_STAGED_INCLUSIVE)
+print(f"{time_0:.4f} ms (NONE)")
+print(f"{time_1a:.4f} ms (JAX, reuse arrays)")
+print(f"{time_1b:.4f} ms (JAX, recapture)")
+print(f"{time_2a:.4f} ms (WARP, reuse arrays)")
+print(f"{time_2b:.4f} ms (WARP, recapture)")
 print(f"{time_3:.4f} ms (WARP_STAGED)")
 print(f"{time_4:.4f} ms (WARP_STAGED_INCLUSIVE)")
