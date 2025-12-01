@@ -68,11 +68,6 @@ def example1():
 
     @jax.jit
     def fun(a, b, c, d):
-        # s = 2.0
-
-        # # output shapes
-        # output_dims = {"e": a.shape, "f": b.shape}
-        # return jax_func(a, b, c, d, s, output_dims=output_dims)
         return jax_func(a, b, c, d, 2.0, output_dims={"e": a.shape, "f": b.shape})
 
     a = jnp.arange(10, dtype=jnp.float32)
@@ -117,11 +112,7 @@ def bench1(
 
     @jax.jit
     def fun(a, b, c, d):
-        s = 2.0
-
-        # output shapes
-        output_dims = {"e": a.shape, "f": b.shape}
-        return jax_func(a, b, c, d, s, output_dims=output_dims)
+        return jax_func(a, b, c, d, 2.0, output_dims={"e": a.shape, "f": b.shape})
 
     times = []
 
@@ -160,7 +151,7 @@ def bench1(
     return avg_time
 
 
-# example1()
+example1()
 # print(bench1(use_nvtx=True, reuse_arrays=True))
 # print(bench1(use_nvtx=True, reuse_arrays=False))
 
